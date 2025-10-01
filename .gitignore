@@ -1,0 +1,44 @@
+# DDEV specific files
+.ddev/
+.ddev/.webimage_build_times
+.ddev/.router_http_port
+.ddev/.router_https_port
+
+# Drupal specific files and directories
+/vendor/
+/web/core/
+/web/modules/contrib/
+/web/themes/contrib/
+/web/profiles/contrib/
+/web/libraries/
+/web/sites/*/files/
+/web/sites/*/private/
+/web/sites/*/settings.php
+/web/sites/*/services.yml
+/web/sites/simpletest/
+/web/modules/custom/*/tests/
+/web/themes/custom/*/tests/
+
+# Composer and related files
+composer.lock
+
+# IDE and OS specific files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.log
+*.sql
+*.sqlite
+
+recipes/
+
+/web/*
+
+# Nhưng vẫn giữ lại custom modules và custom themes
+!/web/modules/
+!/web/modules/custom/
+!/web/modules/custom/**
+!/web/themes/
+!/web/themes/custom/
+!/web/themes/custom/**
