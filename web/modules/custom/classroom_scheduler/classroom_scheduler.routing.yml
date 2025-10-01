@@ -1,0 +1,7 @@
+classroom_scheduler.cron:
+  path: '/cron/classroom/{key}'
+  defaults:
+    _controller: '\Drupal\classroom_scheduler\Controller\ClassroomCronController::run'
+    _title: 'Classroom Scheduler Cron'
+  requirements:
+    _access: 'TRUE'

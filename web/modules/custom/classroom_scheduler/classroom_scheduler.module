@@ -1,0 +1,86 @@
+<?php
+
+use Drupal\node\NodeInterface;
+use Drupal\Core\Form\FormStateInterface;
+
+/**
+ * Implements hook_node_presave().
+ */
+function classroom_scheduler_node_presave(NodeInterface $node) {
+  // Chỉ áp dụng cho content type 'lesson' (buổi học).
+  // Nhớ thay 'lesson' bằng machine name đúng của bạn.
+  if ($node->bundle() === 'lesson') {
+    // ->original chỉ tồn tại khi node đang được cập nhật, không phải tạo mới.
+    if (isset($node->original)) {
+      // Lấy giá trị cũ và giá trị mới của field 'is_happened'.
+      $old_value = $node->original->get('field_is_happened')->value;
+      $new_value = $node->get('field_is_happened')->value;
+
+      // Nếu giá trị cũ là TRUE (1) và giá trị mới là FALSE (0).
+      if ($old_value == 1 && $new_value == 0) {
+        // Ném ra một Exception để ngăn việc lưu lại.
+        // Drupal sẽ bắt exception này và hiển thị thông báo lỗi.
+        throw new \Exception('Bạn không thể thay đổi trạng thái "Có học?" từ Đã diễn ra về Chưa diễn ra.');
+      }
+    }
+  }
+}
+
+/**
+ * Implements hook_node_update().
+ */
+function classroom_scheduler_node_update(NodeInterface $node) {
+  // Chỉ áp dụng cho content type 'lesson'.
+  if ($node->bundle() === 'lesson') {
+    // Lấy giá trị cũ và mới của field.
+    $old_value = $node->original->get('field_is_happened')->value;
+    $new_value = $node->get('field_is_happened')->value;
+
+    // Chỉ hành động khi trạng thái chuyển từ FALSE (0) sang TRUE (1).
+    // Điều này đảm bảo code chỉ chạy MỘT LẦN DUY NHẤT.
+    if ($old_value == 0 && $new_value == 1) {
+      // Tải đối tượng lớp học (classroom) được tham chiếu từ buổi học.
+      /** @var \Drupal\node\NodeInterface $classroom */
+      $classroom = $node->get('field_classroom')->entity;
+
+      // Nếu không tìm thấy lớp học hoặc lớp học không có field học phí, dừng lại.
+      if (!$classroom || !$classroom->hasField('field_fee')) {
+        \Drupal::messenger()->addError('Không tìm thấy lớp học hoặc field học phí để xử lý.');
+        return;
+      }
+      
+      $fee = (int) $classroom->get('field_fee')->value;
+
+      // Nếu học phí bằng 0 hoặc không có, cũng không cần làm gì.
+      if ($fee <= 0) {
+        return;
+      }
+
+      // Lấy danh sách học sinh (user) từ lớp học.
+      $students = $classroom->get('field_student_list')->referencedEntities();
+
+      $processed_students = 0;
+      foreach ($students as $student) {
+        /** @var \Drupal\user\UserInterface $student */
+        if ($student && $student->hasField('field_account_balance')) {
+          $current_balance = (int) $student->get('field_account_balance')->value;
+          $new_balance = $current_balance - $fee;
+          
+          // Cập nhật số dư mới cho học sinh.
+          $student->set('field_account_balance', $new_balance);
+          $student->save();
+          $processed_students++;
+        }
+      }
+
+      // Hiển thị thông báo thành công cho người quản trị.
+      if ($processed_students > 0) {
+        \Drupal::messenger()->addStatus(t('Đã trừ @fee VNĐ từ tài khoản của @count học sinh trong lớp @class.', [
+          '@fee' => $fee,
+          '@count' => $processed_students,
+          '@class' => $classroom->label(),
+        ]));
+      }
+    }
+  }
+}

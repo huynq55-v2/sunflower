@@ -1,0 +1,5 @@
+name: Sunflower Actions
+type: module
+description: 'Custom actions for Sunflower project.'
+core_version_requirement: ^10 || ^11
+package: Custom

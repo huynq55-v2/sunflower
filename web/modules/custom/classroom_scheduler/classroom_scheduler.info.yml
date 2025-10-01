@@ -1,0 +1,7 @@
+name: 'Classroom Scheduler'
+type: module
+description: 'Cron riêng để tạo Buổi học từ lịch định kỳ.'
+core_version_requirement: ^10 || ^11
+package: Custom
+dependencies:
+  - drupal:node
