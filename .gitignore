@@ -42,3 +42,5 @@ recipes/
 !/web/themes/
 !/web/themes/custom/
 !/web/themes/custom/**
+
+*.sql.gz
