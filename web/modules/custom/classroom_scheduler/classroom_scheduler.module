@@ -2,6 +2,7 @@
 
 use Drupal\node\NodeInterface;
 use Drupal\Core\Form\FormStateInterface;
+use Drupal\node\Entity\Node;
 
 /**
  * Implements hook_node_presave().
@@ -81,6 +82,39 @@ function classroom_scheduler_node_update(NodeInterface $node) {
           '@class' => $classroom->label(),
         ]));
       }
+    }
+  }
+}
+
+/**
+ * Implements hook_form_alter().
+ */
+function classroom_scheduler_form_alter(&$form, FormStateInterface $form_state, $form_id) {
+  if ($form_id === 'node_lesson_form') {
+    $request = \Drupal::request();
+    $classroom_id = $request->query->get('field_classroom');
+
+    if ($classroom_id && ($classroom = Node::load($classroom_id))) {
+      // ✅ Điền sẵn classroom.
+      $form['field_classroom']['widget'][0]['target_id']['#default_value'] = $classroom;
+
+      // Khóa field lại, user không thay đổi được.
+      $form['field_classroom']['widget'][0]['target_id']['#disabled'] = TRUE;
+      $form['field_classroom']['widget'][0]['target_id']['#attributes']['readonly'] = 'readonly';
+
+      // ✅ Tính số buổi học hiện có.
+      $query = \Drupal::entityTypeManager()->getStorage('node')->getQuery();
+      $query->condition('type', 'lesson');
+      $query->condition('field_classroom', $classroom_id);
+      $query->accessCheck(FALSE); // Bỏ check quyền để đếm chính xác
+      $count = $query->count()->execute();
+
+      // ✅ Gợi ý Title: "Tên lớp học buổi {count+1}".
+      $next_number = $count + 1;
+      $title_suggest = $classroom->label() . ' buổi ' . str_pad($next_number, 2, '0', STR_PAD_LEFT);
+
+      // Gán vào Title mặc định.
+      $form['title']['widget'][0]['value']['#default_value'] = $title_suggest;
     }
   }
 }
