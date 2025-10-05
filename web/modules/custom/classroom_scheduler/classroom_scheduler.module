@@ -5,83 +5,139 @@ use Drupal\Core\Form\FormStateInterface;
 use Drupal\node\Entity\Node;
 
 /**
- * Implements hook_node_presave().
- */
-function classroom_scheduler_node_presave(NodeInterface $node) {
-  // Chỉ áp dụng cho content type 'lesson' (buổi học).
-  // Nhớ thay 'lesson' bằng machine name đúng của bạn.
-  if ($node->bundle() === 'lesson') {
-    // ->original chỉ tồn tại khi node đang được cập nhật, không phải tạo mới.
-    if (isset($node->original)) {
-      // Lấy giá trị cũ và giá trị mới của field 'is_happened'.
-      $old_value = $node->original->get('field_is_happened')->value;
-      $new_value = $node->get('field_is_happened')->value;
-
-      // Nếu giá trị cũ là TRUE (1) và giá trị mới là FALSE (0).
-      if ($old_value == 1 && $new_value == 0) {
-        // Ném ra một Exception để ngăn việc lưu lại.
-        // Drupal sẽ bắt exception này và hiển thị thông báo lỗi.
-        throw new \Exception('Bạn không thể thay đổi trạng thái "Có học?" từ Đã diễn ra về Chưa diễn ra.');
-      }
-    }
-  }
-}
-
-/**
  * Implements hook_node_update().
  */
 function classroom_scheduler_node_update(NodeInterface $node) {
-  // Chỉ áp dụng cho content type 'lesson'.
-  if ($node->bundle() === 'lesson') {
-    // Lấy giá trị cũ và mới của field.
-    $old_value = $node->original->get('field_is_happened')->value;
-    $new_value = $node->get('field_is_happened')->value;
+  if ($node->bundle() !== 'lesson') {
+    return;
+  }
 
-    // Chỉ hành động khi trạng thái chuyển từ FALSE (0) sang TRUE (1).
-    // Điều này đảm bảo code chỉ chạy MỘT LẦN DUY NHẤT.
-    if ($old_value == 0 && $new_value == 1) {
-      // Tải đối tượng lớp học (classroom) được tham chiếu từ buổi học.
-      /** @var \Drupal\node\NodeInterface $classroom */
-      $classroom = $node->get('field_classroom')->entity;
+  $old_value = $node->original->get('field_is_happened')->value ?? 0;
+  $new_value = $node->get('field_is_happened')->value ?? 0;
 
-      // Nếu không tìm thấy lớp học hoặc lớp học không có field học phí, dừng lại.
-      if (!$classroom || !$classroom->hasField('field_fee')) {
-        \Drupal::messenger()->addError('Không tìm thấy lớp học hoặc field học phí để xử lý.');
-        return;
+  /** @var \Drupal\node\NodeInterface $classroom */
+  $classroom = $node->get('field_classroom')->entity;
+  if (!$classroom) {
+    \Drupal::messenger()->addError('Không tìm thấy lớp học.');
+    return;
+  }
+
+  $fee = (int) $classroom->get('field_fee')->value;
+  $teacher = $classroom->get('field_teacher')->entity ?? NULL;
+  $students = $classroom->get('field_student_list')->referencedEntities();
+
+  if ($fee <= 0 || !$teacher) {
+    \Drupal::messenger()->addError('Lớp học chưa có học phí hoặc giáo viên.');
+    return;
+  }
+
+  $lesson_label = $node->label();
+  $class_label = $classroom->label();
+
+  // ========== CASE 1: Chuyển từ "chưa học" -> "đã học" ==========
+  if ($old_value == 0 && $new_value == 1) {
+    foreach ($students as $student) {
+      if (!$student->hasField('field_account_balance')) continue;
+
+      $balance = (int) $student->get('field_account_balance')->value;
+      $new_balance = $balance - $fee;
+      $student->set('field_account_balance', $new_balance);
+      $student->save();
+
+      $transaction = Node::create([
+        'type' => 'transaction',
+        'title' => "Giao dịch {$lesson_label} - Học sinh",
+        'field_user' => ['target_id' => $student->id()],
+        'field_lesson' => ['target_id' => $node->id()],
+        'field_classroom' => ['target_id' => $classroom->id()],
+        'field_amount' => $fee,
+        'field_type' => 'debit',
+        'field_balance_after' => $new_balance,
+      ]);
+      $transaction->save();
+    }
+
+    // Giáo viên được cộng tổng tiền học sinh
+    $total_credit = count($students) * $fee;
+    if ($teacher->hasField('field_account_balance')) {
+      $balance = (int) $teacher->get('field_account_balance')->value;
+      $new_balance = $balance + $total_credit;
+      $teacher->set('field_account_balance', $new_balance);
+      $teacher->save();
+
+      $transaction = Node::create([
+        'type' => 'transaction',
+        'title' => "Giao dịch {$lesson_label} - Giáo viên",
+        'field_user' => ['target_id' => $teacher->id()],
+        'field_lesson' => ['target_id' => $node->id()],
+        'field_classroom' => ['target_id' => $classroom->id()],
+        'field_amount' => $total_credit,
+        'field_type' => 'credit',
+        'field_balance_after' => $new_balance,
+      ]);
+      $transaction->save();
+    }
+
+    \Drupal::messenger()->addStatus("✅ Đã tạo giao dịch cho buổi học {$lesson_label}.");
+  }
+
+  // ========== CASE 2: Chuyển từ "đã học" -> "chưa học" (Undo) ==========
+  if ($old_value == 1 && $new_value == 0) {
+    $query = \Drupal::entityQuery('node')
+      ->condition('type', 'transaction')
+      ->condition('field_lesson', $node->id())
+      ->accessCheck(FALSE);
+    $transaction_ids = $query->execute();
+
+    if ($transaction_ids) {
+      $transactions = \Drupal\node\Entity\Node::loadMultiple($transaction_ids);
+
+      // Gom theo user để recalculation sau khi xóa.
+      $affected_users = [];
+
+      foreach ($transactions as $txn) {
+        $user = $txn->get('field_user')->entity;
+        if (!$user) continue;
+        $affected_users[$user->id()] = $user;
+
+        // 🧩 Xóa transaction
+        $txn->delete();
       }
-      
-      $fee = (int) $classroom->get('field_fee')->value;
 
-      // Nếu học phí bằng 0 hoặc không có, cũng không cần làm gì.
-      if ($fee <= 0) {
-        return;
-      }
+      // 🧩 Recalculate lại balance cho từng user bị ảnh hưởng
+      foreach ($affected_users as $uid => $user) {
+        $query_all = \Drupal::entityQuery('node')
+          ->condition('type', 'transaction')
+          ->condition('field_user', $uid)
+          ->sort('created', 'ASC')
+          ->accessCheck(FALSE);
+        $all_ids = $query_all->execute();
 
-      // Lấy danh sách học sinh (user) từ lớp học.
-      $students = $classroom->get('field_student_list')->referencedEntities();
+        $running_balance = 0;
+        if ($all_ids) {
+          $all_txns = \Drupal\node\Entity\Node::loadMultiple($all_ids);
 
-      $processed_students = 0;
-      foreach ($students as $student) {
-        /** @var \Drupal\user\UserInterface $student */
-        if ($student && $student->hasField('field_account_balance')) {
-          $current_balance = (int) $student->get('field_account_balance')->value;
-          $new_balance = $current_balance - $fee;
-          
-          // Cập nhật số dư mới cho học sinh.
-          $student->set('field_account_balance', $new_balance);
-          $student->save();
-          $processed_students++;
+          foreach ($all_txns as $t) {
+            $amount = (int) $t->get('field_amount')->value;
+            $type = $t->get('field_type')->value;
+
+            if ($type === 'credit') {
+              $running_balance += $amount;
+            } elseif ($type === 'debit') {
+              $running_balance -= $amount;
+            }
+
+            $t->set('field_balance_after', $running_balance);
+            $t->save();
+          }
         }
+
+        // 🧩 Cập nhật lại số dư thực tế của user
+        $user->set('field_account_balance', $running_balance);
+        $user->save();
       }
 
-      // Hiển thị thông báo thành công cho người quản trị.
-      if ($processed_students > 0) {
-        \Drupal::messenger()->addStatus(t('Đã trừ @fee VNĐ từ tài khoản của @count học sinh trong lớp @class.', [
-          '@fee' => $fee,
-          '@count' => $processed_students,
-          '@class' => $classroom->label(),
-        ]));
-      }
+      \Drupal::messenger()->addStatus("↩️ Đã xóa toàn bộ giao dịch của buổi học và cập nhật lại số dư của các tài khoản liên quan.");
     }
   }
 }
