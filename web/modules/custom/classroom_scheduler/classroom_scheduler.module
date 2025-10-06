@@ -185,7 +185,7 @@ function classroom_scheduler_form_alter(&$form, FormStateInterface $form_state, 
 
       // ✅ Gợi ý Title: "Tên lớp học buổi {count+1}".
       $next_number = $count + 1;
-      $title_suggest = $classroom->label() . ' buổi ' . str_pad($next_number, 2, '0', STR_PAD_LEFT);
+      $title_suggest = $classroom->label() . ' buổi ' . str_pad($next_number, 3, '0', STR_PAD_LEFT);
 
       // Gán vào Title mặc định.
       $form['title']['widget'][0]['value']['#default_value'] = $title_suggest;
