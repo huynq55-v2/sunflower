@@ -100,17 +100,27 @@ function classroom_scheduler_node_update(NodeInterface $node) {
         if (!$user) continue;
         $affected_users[$user->id()] = $user;
 
-        // 🧩 Xóa transaction
+        // 🧩 Xóa transaction của buổi học bị hủy
         $txn->delete();
       }
 
       // 🧩 Recalculate lại balance cho từng user bị ảnh hưởng
       foreach ($affected_users as $uid => $user) {
+        // 💡 Lấy TẤT CẢ các node tài chính liên quan đến user này
         $query_all = \Drupal::entityQuery('node')
-          ->condition('type', 'transaction')
-          ->condition('field_user', $uid)
+          ->condition('type', ['transaction', 'transaction_log'], 'IN')
           ->sort('created', 'ASC')
           ->accessCheck(FALSE);
+
+        // *** SỬA LỖI TẠI ĐÂY ***
+        // Tạo một nhóm điều kiện OR để tìm user trên cả 2 trường khác nhau
+        $user_condition_group = $query_all->orConditionGroup()
+          ->condition('field_user', $uid)
+          ->condition('field_student', $uid); // Giả sử field_student cũng tham chiếu đến User
+
+        // Áp dụng nhóm điều kiện vào query chính
+        $query_all->condition($user_condition_group);
+
         $all_ids = $query_all->execute();
 
         $running_balance = 0;
@@ -118,26 +128,34 @@ function classroom_scheduler_node_update(NodeInterface $node) {
           $all_txns = \Drupal\node\Entity\Node::loadMultiple($all_ids);
 
           foreach ($all_txns as $t) {
+            $bundle = $t->bundle();
             $amount = (int) $t->get('field_amount')->value;
-            $type = $t->get('field_type')->value;
 
-            if ($type === 'credit') {
+            if ($bundle === 'transaction') {
+              $type = $t->get('field_type')->value;
+              if ($type === 'debit') {
+                $running_balance -= $amount;
+              } else {
+                $running_balance += $amount;
+              }
+            }
+            elseif ($bundle === 'transaction_log') {
               $running_balance += $amount;
-            } elseif ($type === 'debit') {
-              $running_balance -= $amount;
             }
 
-            $t->set('field_balance_after', $running_balance);
-            $t->save();
+            if ($t->hasField('field_balance_after')) {
+              $t->set('field_balance_after', $running_balance);
+              $t->save();
+            }
           }
         }
 
-        // 🧩 Cập nhật lại số dư thực tế của user
+        // Cập nhật lại số dư cuối cùng trong tài khoản của user
         $user->set('field_account_balance', $running_balance);
         $user->save();
       }
 
-      \Drupal::messenger()->addStatus("↩️ Đã xóa toàn bộ giao dịch của buổi học và cập nhật lại số dư của các tài khoản liên quan.");
+      \Drupal::messenger()->addStatus("↩️ Đã xóa giao dịch của buổi học và cập nhật lại lịch sử tài khoản.");
     }
   }
 }
