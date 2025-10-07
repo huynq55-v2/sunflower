@@ -24,7 +24,7 @@ function classroom_scheduler_node_update(NodeInterface $node) {
 
   $fee = (int) $classroom->get('field_fee')->value;
   $teacher = $classroom->get('field_teacher')->entity ?? NULL;
-  $students = $classroom->get('field_student_list')->referencedEntities();
+  $students = $node->get('field_student_list')->referencedEntities();
 
   if ($fee <= 0 || !$teacher) {
     \Drupal::messenger()->addError('Lớp học chưa có học phí hoặc giáo viên.');
@@ -168,26 +168,33 @@ function classroom_scheduler_form_alter(&$form, FormStateInterface $form_state, 
     $request = \Drupal::request();
     $classroom_id = $request->query->get('field_classroom');
 
+    // 🧩 Nếu tạo buổi học mới từ đường dẫn có classroom_id
     if ($classroom_id && ($classroom = Node::load($classroom_id))) {
-      // ✅ Điền sẵn classroom.
+      // ✅ Điền sẵn classroom
       $form['field_classroom']['widget'][0]['target_id']['#default_value'] = $classroom;
-
-      // Khóa field lại, user không thay đổi được.
       $form['field_classroom']['widget'][0]['target_id']['#disabled'] = TRUE;
       $form['field_classroom']['widget'][0]['target_id']['#attributes']['readonly'] = 'readonly';
 
-      // ✅ Tính số buổi học hiện có.
+      // ✅ Clone danh sách học sinh từ classroom sang lesson
+      if ($classroom->hasField('field_student_list')) {
+        $student_refs = [];
+        foreach ($classroom->get('field_student_list')->referencedEntities() as $student) {
+          $student_refs[] = ['target_id' => $student->id()];
+        }
+        if (!empty($student_refs)) {
+          $form['field_student_list']['widget']['#default_value'] = $classroom->get('field_student_list')->referencedEntities();
+        }
+      }
+
+      // ✅ Gợi ý tên buổi học
       $query = \Drupal::entityTypeManager()->getStorage('node')->getQuery();
       $query->condition('type', 'lesson');
       $query->condition('field_classroom', $classroom_id);
-      $query->accessCheck(FALSE); // Bỏ check quyền để đếm chính xác
+      $query->accessCheck(FALSE);
       $count = $query->count()->execute();
 
-      // ✅ Gợi ý Title: "Tên lớp học buổi {count+1}".
       $next_number = $count + 1;
       $title_suggest = $classroom->label() . ' buổi ' . str_pad($next_number, 3, '0', STR_PAD_LEFT);
-
-      // Gán vào Title mặc định.
       $form['title']['widget'][0]['value']['#default_value'] = $title_suggest;
     }
   }
