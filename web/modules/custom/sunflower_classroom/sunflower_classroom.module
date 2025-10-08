@@ -1,0 +1,83 @@
+<?php
+
+use Drupal\node\Entity\Node;
+
+/**
+ * Implements hook_entity_presave().
+ */
+function sunflower_classroom_entity_presave(\Drupal\Core\Entity\EntityInterface $entity) {
+  // Chỉ xử lý với content type "classroom"
+  if ($entity->getEntityTypeId() !== 'node' || $entity->bundle() !== 'classroom') {
+    return;
+  }
+
+  $class_id = $entity->id();
+  $class_label = $entity->label();
+
+  // 🧩 Tạo account cho học sinh
+  if ($entity->hasField('field_student_list')) {
+    $student_refs = $entity->get('field_student_list')->referencedEntities();
+
+    foreach ($student_refs as $student) {
+      $uid = $student->id();
+
+      // Kiểm tra account học sinh + lớp này đã tồn tại chưa
+      $query = \Drupal::entityQuery('node')
+        ->condition('type', 'account')
+        ->condition('field_student', $uid)
+        ->condition('field_classroom', $class_id)
+        ->accessCheck(FALSE);
+
+      $existing = $query->execute();
+
+      if (empty($existing)) {
+        $account = Node::create([
+          'type' => 'account',
+          'title' => "Tài khoản học sinh: " . $student->label() . ' - ' . $class_label,
+          'field_student' => $uid,
+          'field_classroom' => $class_id,
+          'field_balance' => 0,
+        ]);
+        $account->save();
+
+        \Drupal::logger('sunflower_classroom')->notice('Đã tạo tài khoản học sinh cho @student trong lớp @class', [
+          '@student' => $student->label(),
+          '@class' => $class_label,
+        ]);
+      }
+    }
+  }
+
+  // 🧩 Tạo account cho giáo viên (mỗi lớp một tài khoản)
+  if ($entity->hasField('field_teacher') && !$entity->get('field_teacher')->isEmpty()) {
+    $teacher = $entity->get('field_teacher')->entity;
+    if ($teacher) {
+      $teacher_uid = $teacher->id();
+
+      // Kiểm tra account giáo viên cho lớp này đã tồn tại chưa
+      $query = \Drupal::entityQuery('node')
+        ->condition('type', 'account')
+        ->condition('field_student', $teacher_uid)
+        ->condition('field_classroom', $class_id)
+        ->accessCheck(FALSE);
+
+      $existing_teacher_accounts = $query->execute();
+
+      if (empty($existing_teacher_accounts)) {
+        $account = Node::create([
+          'type' => 'account',
+          'title' => "Tài khoản giáo viên: " . $teacher->label() . ' - ' . $class_label,
+          'field_student' => $teacher_uid,
+          'field_classroom' => $class_id,
+          'field_balance' => 0,
+        ]);
+        $account->save();
+
+        \Drupal::logger('sunflower_classroom')->notice('Đã tạo tài khoản giáo viên @teacher cho lớp @class', [
+          '@teacher' => $teacher->label(),
+          '@class' => $class_label,
+        ]);
+      }
+    }
+  }
+}

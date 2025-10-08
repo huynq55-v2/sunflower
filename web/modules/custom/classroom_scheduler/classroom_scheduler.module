@@ -36,20 +36,24 @@ function classroom_scheduler_node_update(NodeInterface $node) {
 
   // ========== CASE 1: Chuyển từ "chưa học" -> "đã học" ==========
   if ($old_value == 0 && $new_value == 1) {
+    // 🧩 Xử lý học sinh
     foreach ($students as $student) {
-      if (!$student->hasField('field_account_balance')) continue;
+      $student_account = sunflower_get_account_for($student->id(), $classroom->id());
+      if (!$student_account) continue;
 
-      $balance = (int) $student->get('field_account_balance')->value;
+      $balance = (int) $student_account->get('field_balance')->value;
       $new_balance = $balance - $fee;
-      $student->set('field_account_balance', $new_balance);
-      $student->save();
 
+      // Cập nhật balance
+      $student_account->set('field_balance', $new_balance);
+      $student_account->save();
+
+      // Ghi lại giao dịch
       $transaction = Node::create([
         'type' => 'transaction',
-        'title' => "Giao dịch {$lesson_label} - Học sinh",
-        'field_user' => ['target_id' => $student->id()],
+        'title' => "Học phí {$lesson_label} - {$student->label()}",
         'field_lesson' => ['target_id' => $node->id()],
-        'field_classroom' => ['target_id' => $classroom->id()],
+        'field_account' => ['target_id' => $student_account->id()],
         'field_amount' => $fee,
         'field_type' => 'debit',
         'field_balance_after' => $new_balance,
@@ -57,20 +61,21 @@ function classroom_scheduler_node_update(NodeInterface $node) {
       $transaction->save();
     }
 
-    // Giáo viên được cộng tổng tiền học sinh
-    $total_credit = count($students) * $fee;
-    if ($teacher->hasField('field_account_balance')) {
-      $balance = (int) $teacher->get('field_account_balance')->value;
+    // 🧩 Xử lý giáo viên
+    $teacher_account = sunflower_get_account_for($teacher->id(), $classroom->id());
+    if ($teacher_account) {
+      $total_credit = count($students) * $fee;
+      $balance = (int) $teacher_account->get('field_balance')->value;
       $new_balance = $balance + $total_credit;
-      $teacher->set('field_account_balance', $new_balance);
-      $teacher->save();
+
+      $teacher_account->set('field_balance', $new_balance);
+      $teacher_account->save();
 
       $transaction = Node::create([
         'type' => 'transaction',
-        'title' => "Giao dịch {$lesson_label} - Giáo viên",
-        'field_user' => ['target_id' => $teacher->id()],
+        'title' => "Thu nhập {$lesson_label} - {$teacher->label()}",
         'field_lesson' => ['target_id' => $node->id()],
-        'field_classroom' => ['target_id' => $classroom->id()],
+        'field_account' => ['target_id' => $teacher_account->id()],
         'field_amount' => $total_credit,
         'field_type' => 'credit',
         'field_balance_after' => $new_balance,
@@ -81,7 +86,7 @@ function classroom_scheduler_node_update(NodeInterface $node) {
     \Drupal::messenger()->addStatus("✅ Đã tạo giao dịch cho buổi học {$lesson_label}.");
   }
 
-  // ========== CASE 2: Chuyển từ "đã học" -> "chưa học" (Undo) ==========
+  // ========== CASE 2: Chuyển từ "đã học" -> "chưa học" ==========
   if ($old_value == 1 && $new_value == 0) {
     $query = \Drupal::entityQuery('node')
       ->condition('type', 'transaction')
@@ -90,74 +95,86 @@ function classroom_scheduler_node_update(NodeInterface $node) {
     $transaction_ids = $query->execute();
 
     if ($transaction_ids) {
-      $transactions = \Drupal\node\Entity\Node::loadMultiple($transaction_ids);
+      $transactions = Node::loadMultiple($transaction_ids);
 
-      // Gom theo user để recalculation sau khi xóa.
-      $affected_users = [];
+      // Gom các account bị ảnh hưởng
+      $affected_accounts = [];
 
       foreach ($transactions as $txn) {
-        $user = $txn->get('field_user')->entity;
-        if (!$user) continue;
-        $affected_users[$user->id()] = $user;
+        $account = $txn->get('field_account')->entity;
+        if (!$account) continue;
 
-        // 🧩 Xóa transaction của buổi học bị hủy
+        $amount = (int) $txn->get('field_amount')->value;
+        $type = $txn->get('field_type')->value;
+
+        if ($type === 'debit') {
+          $account->set('field_balance', $account->get('field_balance')->value + $amount);
+        }
+        elseif ($type === 'credit') {
+          $account->set('field_balance', $account->get('field_balance')->value - $amount);
+        }
+
+        $account->save();
         $txn->delete();
       }
 
-      // 🧩 Recalculate lại balance cho từng user bị ảnh hưởng
-      foreach ($affected_users as $uid => $user) {
-        // 💡 Lấy TẤT CẢ các node tài chính liên quan đến user này
+      // Recalculate lại balance của các account bị ảnh hưởng
+      foreach ($affected_accounts as $account) {
         $query_all = \Drupal::entityQuery('node')
-          ->condition('type', ['transaction', 'transaction_log'], 'IN')
+          ->condition('type', 'transaction')
+          ->condition('field_account', $account->id())
           ->sort('created', 'ASC')
           ->accessCheck(FALSE);
-
-        // *** SỬA LỖI TẠI ĐÂY ***
-        // Tạo một nhóm điều kiện OR để tìm user trên cả 2 trường khác nhau
-        $user_condition_group = $query_all->orConditionGroup()
-          ->condition('field_user', $uid)
-          ->condition('field_student', $uid); // Giả sử field_student cũng tham chiếu đến User
-
-        // Áp dụng nhóm điều kiện vào query chính
-        $query_all->condition($user_condition_group);
 
         $all_ids = $query_all->execute();
 
         $running_balance = 0;
         if ($all_ids) {
-          $all_txns = \Drupal\node\Entity\Node::loadMultiple($all_ids);
+          $all_txns = Node::loadMultiple($all_ids);
 
           foreach ($all_txns as $t) {
-            $bundle = $t->bundle();
+            $type = $t->get('field_type')->value;
             $amount = (int) $t->get('field_amount')->value;
 
-            if ($bundle === 'transaction') {
-              $type = $t->get('field_type')->value;
-              if ($type === 'debit') {
-                $running_balance -= $amount;
-              } else {
-                $running_balance += $amount;
-              }
-            }
-            elseif ($bundle === 'transaction_log') {
+            if ($type === 'debit') {
+              $running_balance -= $amount;
+            } else {
               $running_balance += $amount;
             }
 
-            if ($t->hasField('field_balance_after')) {
-              $t->set('field_balance_after', $running_balance);
-              $t->save();
-            }
+            $t->set('field_balance_after', $running_balance);
+            $t->save();
           }
         }
 
-        // Cập nhật lại số dư cuối cùng trong tài khoản của user
-        $user->set('field_account_balance', $running_balance);
-        $user->save();
+        $account->set('field_balance', $running_balance);
+        $account->save();
       }
 
-      \Drupal::messenger()->addStatus("↩️ Đã xóa giao dịch của buổi học và cập nhật lại lịch sử tài khoản.");
+      \Drupal::messenger()->addStatus("↩️ Đã xóa giao dịch của buổi học và cập nhật lại số dư các tài khoản.");
     }
   }
+}
+
+/**
+ * Helper: Lấy Account node cho user + classroom.
+ *
+ * @param int $uid
+ * @param int $classroom_id
+ * @return \Drupal\node\Entity\Node|null
+ */
+function sunflower_get_account_for($uid, $classroom_id) {
+  $query = \Drupal::entityQuery('node')
+    ->condition('type', 'account')
+    ->condition('field_student', $uid)
+    ->condition('field_classroom', $classroom_id)
+    ->accessCheck(FALSE);
+
+  $ids = $query->execute();
+  if (empty($ids)) return NULL;
+
+  $account_id = reset($ids);
+  return Node::load($account_id);
 }
 
 /**

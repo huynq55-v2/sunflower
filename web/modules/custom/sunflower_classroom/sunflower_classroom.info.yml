@@ -1,0 +1,5 @@
+name: Sunflower classroom
+type: module
+description: 'Sunflower classroom'
+core_version_requirement: ^10 || ^11
+package: Custom
