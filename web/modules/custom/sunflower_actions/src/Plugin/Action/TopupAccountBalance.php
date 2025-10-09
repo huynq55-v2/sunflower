@@ -16,9 +16,6 @@ use Drupal\node\Entity\Node;
  */
 class TopupAccountBalance extends ConfigurableActionBase {
 
-  /**
-   * {@inheritdoc}
-   */
   public function defaultConfiguration() {
     return [
       'amount' => 0,
@@ -26,9 +23,6 @@ class TopupAccountBalance extends ConfigurableActionBase {
     ];
   }
 
-  /**
-   * {@inheritdoc}
-   */
   public function buildConfigurationForm(array $form, FormStateInterface $form_state) {
     $form['amount'] = [
       '#type' => 'number',
@@ -49,19 +43,13 @@ class TopupAccountBalance extends ConfigurableActionBase {
     return $form;
   }
 
-  /**
-   * {@inheritdoc}
-   */
   public function submitConfigurationForm(array &$form, FormStateInterface $form_state) {
     $this->configuration['amount'] = $form_state->getValue('amount');
     $this->configuration['reason'] = $form_state->getValue('reason');
   }
 
-  /**
-   * {@inheritdoc}
-   */
   public function execute($entity = NULL) {
-    // Chỉ xử lý nếu là node Account.
+    // Only work on account nodes.
     if (!$entity instanceof Node || $entity->bundle() !== 'account') {
       return;
     }
@@ -70,51 +58,62 @@ class TopupAccountBalance extends ConfigurableActionBase {
     $reason = trim($this->configuration['reason']);
     $cashier = \Drupal::currentUser();
 
-    // Cập nhật số dư tài khoản.
-    $current = (float) $entity->get('field_balance')->value;
-    $new_balance = $current + $amount;
-    $entity->set('field_balance', $new_balance);
-    $entity->save();
-
-    // Lấy ngày hiện tại.
+    // Prepare an ISO timestamp string for field_date and created time.
+    $now = \Drupal::time()->getRequestTime();
     $field_date_value = \Drupal::service('date.formatter')
-      ->format(\Drupal::time()->getRequestTime(), 'custom', 'Y-m-d\TH:i:s');
+      ->format($now, 'custom', 'Y-m-d\TH:i:s');
 
-    // 🧾 Ghi log giao dịch.
+    // 1) Create the transaction_log node (do NOT pre-change account->field_balance here).
     $log = Node::create([
       'type' => 'transaction_log',
-      'title' => sprintf('Topup for %s (%+.0f)', $entity->label(), $amount),
+      'title' => sprintf('%s for %s (%+.0f)', ($amount >= 0 ? 'Topup' : 'Deduct'), $entity->label(), $amount),
       'field_account' => ['target_id' => $entity->id()],
       'field_amount' => $amount,
       'field_cashier' => ['target_id' => $cashier->id()],
       'field_date' => $field_date_value,
       'field_topup_reason' => $reason,
     ]);
+
+    // Set created time to match field_date (so ordering by effective time will work).
+    $ts = strtotime($field_date_value) ?: $now;
+    $log->setCreatedTime($ts);
     $log->save();
 
-    // Nếu account có field_transactions → thêm liên kết log này vào.
+    // 2) Attach to account->field_transactions if exists (pre-save)
     if ($entity->hasField('field_transactions')) {
       $transactions = $entity->get('field_transactions')->getValue();
-      $transactions[] = ['target_id' => $log->id()];
-      $entity->set('field_transactions', $transactions);
-      $entity->save();
+      // avoid duplicates
+      $exists = FALSE;
+      foreach ($transactions as $t) {
+        if (!empty($t['target_id']) && $t['target_id'] == $log->id()) {
+          $exists = TRUE;
+          break;
+        }
+      }
+      if (!$exists) {
+        $transactions[] = ['target_id' => $log->id()];
+        $entity->set('field_transactions', $transactions);
+        $entity->save();
+      }
     }
 
-    // Hiển thị thông báo.
-    \Drupal::messenger()->addStatus(t('✅ Updated balance for %account by %amount (new balance: %new).', [
+    // 3) Recalculate entire account history so field_balance_after is correct for ALL txns.
+    if (function_exists('sunflower_recalculate_account_balance')) {
+      sunflower_recalculate_account_balance($entity);
+    } else {
+      \Drupal::logger('sunflower_actions')->warning('sunflower_recalculate_account_balance() not found — please make sure it is declared and autoloaded.');
+    }
+
+    // Feedback
+    \Drupal::messenger()->addStatus(t('✅ %amount applied to account %account. Recalculated history.', [
+      '%amount' => sprintf('%+.0f', $amount),
       '%account' => $entity->label(),
-      '%amount' => $amount,
-      '%new' => $new_balance,
     ]));
   }
 
-  /**
-   * {@inheritdoc}
-   */
   public function access($object, $account = NULL, $return_as_object = FALSE) {
     $account = $account ?: \Drupal::currentUser();
     $allowed = $account->hasRole('cashier') || $account->hasRole('manager');
     return $return_as_object ? AccessResult::allowedIf($allowed) : $allowed;
   }
-
 }

@@ -32,46 +32,49 @@ function classroom_scheduler_node_update(NodeInterface $node) {
   }
 
   $lesson_label = $node->label();
-  $class_label = $classroom->label();
+  $study_time = $node->get('field_study_time')->value;
+  $timestamp = $study_time ? strtotime($study_time) : time();
 
-  // ========== CASE 1: Chuyển từ "chưa học" -> "đã học" ==========
+  // ========== CASE 1: "chưa học" -> "đã học" ==========
   if ($old_value == 0 && $new_value == 1) {
-    // 🧩 Xử lý học sinh
+    // 🧩 Học sinh
     foreach ($students as $student) {
-      $student_account = sunflower_get_account_for($student->id(), $classroom->id());
-      if (!$student_account) continue;
+      $account = sunflower_get_account_for($student->id(), $classroom->id());
+      if (!$account) continue;
 
-      $balance = (int) $student_account->get('field_balance')->value;
-      $new_balance = $balance - $fee;
+      $fee_amount = $fee;
+      $balance = (int) $account->get('field_balance')->value;
+      $new_balance = $balance - $fee_amount;
 
-      // Cập nhật balance
-      $student_account->set('field_balance', $new_balance);
-      $student_account->save();
+      $account->set('field_balance', $new_balance)->save();
 
-      // Ghi lại giao dịch
-      $transaction = Node::create([
+      $txn = Node::create([
         'type' => 'transaction',
         'title' => "Học phí {$lesson_label} - {$student->label()}",
         'field_lesson' => ['target_id' => $node->id()],
-        'field_account' => ['target_id' => $student_account->id()],
-        'field_amount' => $fee,
+        'field_account' => ['target_id' => $account->id()],
+        'field_amount' => $fee_amount,
         'field_type' => 'debit',
         'field_balance_after' => $new_balance,
+        'field_date' => substr($study_time, 0, 10),
       ]);
-      $transaction->save();
+      $txn->setCreatedTime($timestamp);
+      $txn->save();
+
+      // Recalculate lại toàn bộ balance sau khi thêm giao dịch
+      sunflower_recalculate_account_balance($account);
     }
 
-    // 🧩 Xử lý giáo viên
+    // 🧩 Giáo viên
     $teacher_account = sunflower_get_account_for($teacher->id(), $classroom->id());
     if ($teacher_account) {
       $total_credit = count($students) * $fee;
       $balance = (int) $teacher_account->get('field_balance')->value;
       $new_balance = $balance + $total_credit;
 
-      $teacher_account->set('field_balance', $new_balance);
-      $teacher_account->save();
+      $teacher_account->set('field_balance', $new_balance)->save();
 
-      $transaction = Node::create([
+      $txn = Node::create([
         'type' => 'transaction',
         'title' => "Thu nhập {$lesson_label} - {$teacher->label()}",
         'field_lesson' => ['target_id' => $node->id()],
@@ -79,76 +82,51 @@ function classroom_scheduler_node_update(NodeInterface $node) {
         'field_amount' => $total_credit,
         'field_type' => 'credit',
         'field_balance_after' => $new_balance,
+        'field_date' => substr($study_time, 0, 10),
       ]);
-      $transaction->save();
+      $txn->setCreatedTime($timestamp);
+      $txn->save();
+
+      sunflower_recalculate_account_balance($teacher_account);
     }
 
     \Drupal::messenger()->addStatus("✅ Đã tạo giao dịch cho buổi học {$lesson_label}.");
   }
 
-  // ========== CASE 2: Chuyển từ "đã học" -> "chưa học" ==========
+  // ========== CASE 2: "đã học" -> "chưa học" ==========
   if ($old_value == 1 && $new_value == 0) {
     $query = \Drupal::entityQuery('node')
       ->condition('type', 'transaction')
       ->condition('field_lesson', $node->id())
       ->accessCheck(FALSE);
-    $transaction_ids = $query->execute();
+    $txn_ids = $query->execute();
 
-    if ($transaction_ids) {
-      $transactions = Node::loadMultiple($transaction_ids);
-
-      // Gom các account bị ảnh hưởng
+    if ($txn_ids) {
+      $txns = Node::loadMultiple($txn_ids);
       $affected_accounts = [];
 
-      foreach ($transactions as $txn) {
+      foreach ($txns as $txn) {
         $account = $txn->get('field_account')->entity;
         if (!$account) continue;
 
         $amount = (int) $txn->get('field_amount')->value;
         $type = $txn->get('field_type')->value;
 
+        // Khôi phục số dư ban đầu
         if ($type === 'debit') {
           $account->set('field_balance', $account->get('field_balance')->value + $amount);
-        }
-        elseif ($type === 'credit') {
+        } else {
           $account->set('field_balance', $account->get('field_balance')->value - $amount);
         }
 
         $account->save();
+        $affected_accounts[$account->id()] = $account;
         $txn->delete();
       }
 
-      // Recalculate lại balance của các account bị ảnh hưởng
-      foreach ($affected_accounts as $account) {
-        $query_all = \Drupal::entityQuery('node')
-          ->condition('type', 'transaction')
-          ->condition('field_account', $account->id())
-          ->sort('created', 'ASC')
-          ->accessCheck(FALSE);
-
-        $all_ids = $query_all->execute();
-
-        $running_balance = 0;
-        if ($all_ids) {
-          $all_txns = Node::loadMultiple($all_ids);
-
-          foreach ($all_txns as $t) {
-            $type = $t->get('field_type')->value;
-            $amount = (int) $t->get('field_amount')->value;
-
-            if ($type === 'debit') {
-              $running_balance -= $amount;
-            } else {
-              $running_balance += $amount;
-            }
-
-            $t->set('field_balance_after', $running_balance);
-            $t->save();
-          }
-        }
-
-        $account->set('field_balance', $running_balance);
-        $account->save();
+      // Cập nhật lại balance_after cho toàn bộ giao dịch còn lại
+      foreach ($affected_accounts as $acc) {
+        sunflower_recalculate_account_balance($acc);
       }
 
       \Drupal::messenger()->addStatus("↩️ Đã xóa giao dịch của buổi học và cập nhật lại số dư các tài khoản.");
@@ -214,5 +192,176 @@ function classroom_scheduler_form_alter(&$form, FormStateInterface $form_state, 
       $title_suggest = $classroom->label() . ' buổi ' . str_pad($next_number, 3, '0', STR_PAD_LEFT);
       $form['title']['widget'][0]['value']['#default_value'] = $title_suggest;
     }
+  }
+}
+
+/**
+ * Tính toán lại toàn bộ lịch sử số dư cho một tài khoản.
+ *
+ * Hàm này sẽ:
+ * 1. Lấy tất cả các giao dịch thuộc 2 loại: 'transaction' (buổi học) và 'topup' (nạp/rút tiền).
+ * 2. Sắp xếp chúng theo "thời gian hiệu lực" chính xác:
+ *    - Giao dịch buổi học: Dựa vào ngày học `field_study_time` (coi là 00:00:00 của ngày đó).
+ *    - Giao dịch nạp/rút: Dựa vào ngày giờ `field_date`.
+ * 3. Tính toán lại `field_balance_after` cho TỪNG giao dịch theo đúng thứ tự.
+ * 4. Cập nhật `field_balance` cuối cùng cho chính node tài khoản.
+ * 5. Có cơ chế chống gọi lặp (đệ quy) để đảm bảo ổn định.
+ * 6. Ghi log chi tiết từng bước vào Watchdog để dễ dàng gỡ lỗi.
+ *
+ * @param int|\Drupal\node\NodeInterface $account
+ *   Node object hoặc NID của tài khoản (content type 'account').
+ */
+function sunflower_recalculate_account_balance($account) {
+  // Biến static để chống gọi lặp trong cùng một request.
+  static $running_accounts = [];
+
+  // --- 1. Chuẩn bị và kiểm tra đầu vào ---
+  if (is_numeric($account)) {
+    $account = \Drupal\node\Entity\Node::load((int) $account);
+  }
+
+  if (!$account instanceof NodeInterface || $account->bundle() !== 'account') {
+    \Drupal::logger('sunflower')->error('Hàm sunflower_recalculate_account_balance() được gọi với tài khoản không hợp lệ.');
+    return;
+  }
+
+  $account_id = $account->id();
+
+  // Nếu hàm đang chạy cho tài khoản này rồi, bỏ qua để tránh đệ quy.
+  if (!empty($running_accounts[$account_id])) {
+    \Drupal::logger('sunflower')->debug('Bỏ qua lời gọi đệ quy tới sunflower_recalculate_account_balance() cho tài khoản @id.', ['@id' => $account_id]);
+    return;
+  }
+  $running_accounts[$account_id] = TRUE;
+
+  try {
+    \Drupal::logger('sunflower')->notice('Bắt đầu tính lại số dư cho tài khoản @id (@title).', [
+      '@id' => $account_id,
+      '@title' => $account->label(),
+    ]);
+
+    // --- 2. Truy vấn TẤT CẢ các loại giao dịch liên quan ---
+    $query = \Drupal::entityQuery('node')
+      ->condition('type', ['transaction', 'transaction_log'], 'IN')
+      ->condition('field_account', $account_id)
+      ->accessCheck(FALSE); // Bắt buộc cho Drupal 10+
+    $txn_ids = $query->execute();
+
+    // Nếu không có giao dịch, reset số dư về 0.
+    if (empty($txn_ids)) {
+      $account->set('field_balance', 0)->save();
+      \Drupal::logger('sunflower')->notice('Tài khoản @id không có giao dịch. Số dư được đặt về 0.', ['@id' => $account_id]);
+      $running_accounts[$account_id] = FALSE; // Reset flag trước khi thoát
+      return;
+    }
+
+    $transactions = \Drupal\node\Entity\Node::loadMultiple($txn_ids);
+
+    // --- 3. Xây dựng mảng để sắp xếp theo "thời gian hiệu lực" ---
+    $items_to_sort = [];
+    foreach ($transactions as $txn) {
+      $effective_timestamp = NULL;
+
+      // Giao dịch buổi học (transaction) -> ưu tiên ngày học.
+      if ($txn->bundle() === 'transaction' && $txn->hasField('field_lesson') && !$txn->get('field_lesson')->isEmpty()) {
+        $lesson = $txn->get('field_lesson')->entity;
+        if ($lesson && $lesson->hasField('field_study_time') && !$lesson->get('field_study_time')->isEmpty()) {
+          $date_only = $lesson->get('field_study_time')->value;
+          if ($date_only) {
+            // Ngày học là "date only", coi là đầu ngày (00:00:00).
+            $effective_timestamp = strtotime($date_only . ' 00:00:00');
+          }
+        }
+      }
+
+      // Giao dịch nạp/rút (topup) -> ưu tiên ngày nạp.
+      if ($effective_timestamp === NULL && $txn->hasField('field_date') && !$txn->get('field_date')->isEmpty()) {
+        $datetime = $txn->get('field_date')->value;
+        if ($datetime) {
+          $effective_timestamp = strtotime($datetime);
+        }
+      }
+
+      // Nếu không có thông tin, dùng thời gian tạo node làm fallback.
+      if ($effective_timestamp === NULL) {
+        $effective_timestamp = $txn->getCreatedTime();
+      }
+
+      $items_to_sort[] = [
+        'txn' => $txn,
+        'effective_time' => (int) $effective_timestamp,
+        'created' => (int) $txn->getCreatedTime(),
+        'nid' => (int) $txn->id(),
+      ];
+    }
+
+    // Sắp xếp: theo thời gian hiệu lực -> thời gian tạo -> NID.
+    usort($items_to_sort, function ($a, $b) {
+      if ($a['effective_time'] !== $b['effective_time']) {
+        return $a['effective_time'] <=> $b['effective_time'];
+      }
+      if ($a['created'] !== $b['created']) {
+        return $a['created'] <=> $b['created'];
+      }
+      return $a['nid'] <=> $b['nid'];
+    });
+
+    // --- 4. Tính toán lại số dư tuần tự ---
+    $running_balance = 0;
+    foreach ($items_to_sort as $item) {
+      /** @var \Drupal\node\Entity\Node $txn */
+      $txn = $item['txn'];
+      $amount = (float) $txn->get('field_amount')->value;
+
+      if ($txn->bundle() === 'transaction') {
+        // Giao dịch buổi học: dựa vào debit/credit.
+        $type = $txn->get('field_type')->value;
+        if ($type === 'debit') {
+          $running_balance -= $amount;
+        }
+        elseif ($type === 'credit') {
+          $running_balance += $amount;
+        }
+      }
+      else {
+        // Giao dịch nạp/rút (topup): cộng trực tiếp giá trị (có thể âm).
+        $running_balance += $amount;
+      }
+
+      // Cập nhật số dư sau giao dịch.
+      if ($txn->hasField('field_balance_after')) {
+        $txn->set('field_balance_after', (int) $running_balance);
+        // Lưu từng node một để tránh lỗi saveMultiple() và đã có cơ chế chống đệ quy.
+        $txn->save();
+      }
+
+      \Drupal::logger('sunflower')->debug('Giao dịch @id (@type): Amount: @amount, Thời gian hiệu lực: @time => Số dư mới: @balance', [
+        '@id' => $txn->id(),
+        '@type' => $txn->bundle(),
+        '@amount' => $amount,
+        '@time' => date('Y-m-d H:i:s', $item['effective_time']),
+        '@balance' => (int) $running_balance,
+      ]);
+    }
+
+    // --- 5. Cập nhật số dư cuối cùng cho tài khoản ---
+    $account->set('field_balance', (int) $running_balance);
+    $account->save();
+
+    \Drupal::logger('sunflower')->info('Hoàn tất tính lại tài khoản @id. Số dư cuối cùng: @balance', [
+      '@id' => $account_id,
+      '@balance' => (int) $running_balance,
+    ]);
+
+  }
+  catch (\Throwable $e) {
+    \Drupal::logger('sunflower')->error('Lỗi khi đang tính lại số dư cho tài khoản @id: @message', [
+      '@id' => $account_id,
+      '@message' => $e->getMessage(),
+    ]);
+  }
+  finally {
+    // Luôn reset flag sau khi chạy xong.
+    $running_accounts[$account_id] = FALSE;
   }
 }
