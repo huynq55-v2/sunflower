@@ -11,6 +11,31 @@ function sunflower_classroom_entity_presave(\Drupal\Core\Entity\EntityInterface 
     return;
   }
 
+  // Nếu là node mới, Drupal chưa gán ID → xử lý sau khi insert
+  if ($entity->isNew()) {
+    \Drupal::service('module_handler')->invoke('sunflower_classroom', 'pending_create_accounts', [$entity]);
+    return;
+  }
+
+  // Nếu là node đã tồn tại (edit) → tạo account ngay
+  _sunflower_classroom_create_accounts($entity);
+}
+
+/**
+ * Implements hook_entity_insert().
+ */
+function sunflower_classroom_entity_insert(\Drupal\Core\Entity\EntityInterface $entity) {
+  if ($entity->getEntityTypeId() !== 'node' || $entity->bundle() !== 'classroom') {
+    return;
+  }
+
+  _sunflower_classroom_create_accounts($entity);
+}
+
+/**
+ * Tạo account cho học sinh và giáo viên của lớp học.
+ */
+function _sunflower_classroom_create_accounts(\Drupal\node\Entity\Node $entity) {
   $class_id = $entity->id();
   $class_label = $entity->label();
 
@@ -48,13 +73,13 @@ function sunflower_classroom_entity_presave(\Drupal\Core\Entity\EntityInterface 
     }
   }
 
-  // 🧩 Tạo account cho giáo viên (mỗi lớp một tài khoản)
+  // 🧩 Tạo account cho giáo viên
   if ($entity->hasField('field_teacher') && !$entity->get('field_teacher')->isEmpty()) {
     $teacher = $entity->get('field_teacher')->entity;
     if ($teacher) {
       $teacher_uid = $teacher->id();
 
-      // Kiểm tra account giáo viên cho lớp này đã tồn tại chưa
+      // Kiểm tra account giáo viên + lớp này đã tồn tại chưa
       $query = \Drupal::entityQuery('node')
         ->condition('type', 'account')
         ->condition('field_student', $teacher_uid)

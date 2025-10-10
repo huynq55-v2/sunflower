@@ -37,7 +37,6 @@ function classroom_scheduler_node_update(NodeInterface $node) {
 
   // ========== CASE 1: "chưa học" -> "đã học" ==========
   if ($old_value == 0 && $new_value == 1) {
-    // 🧩 Học sinh
     foreach ($students as $student) {
       $account = sunflower_get_account_for($student->id(), $classroom->id());
       if (!$account) continue;
@@ -61,7 +60,9 @@ function classroom_scheduler_node_update(NodeInterface $node) {
       $txn->setCreatedTime($timestamp);
       $txn->save();
 
-      // Recalculate lại toàn bộ balance sau khi thêm giao dịch
+      // ✅ Thêm transaction này vào field_transactions (và giữ thứ tự thời gian)
+      sunflower_update_account_transactions($account, $txn);
+
       sunflower_recalculate_account_balance($account);
     }
 
@@ -87,6 +88,7 @@ function classroom_scheduler_node_update(NodeInterface $node) {
       $txn->setCreatedTime($timestamp);
       $txn->save();
 
+      sunflower_update_account_transactions($teacher_account, $txn);
       sunflower_recalculate_account_balance($teacher_account);
     }
 
@@ -118,18 +120,20 @@ function classroom_scheduler_node_update(NodeInterface $node) {
         } else {
           $account->set('field_balance', $account->get('field_balance')->value - $amount);
         }
-
         $account->save();
+
+        // ✅ Xóa transaction khỏi field_transactions
+        sunflower_remove_transaction_from_account($account, $txn);
+
         $affected_accounts[$account->id()] = $account;
         $txn->delete();
       }
 
-      // Cập nhật lại balance_after cho toàn bộ giao dịch còn lại
       foreach ($affected_accounts as $acc) {
         sunflower_recalculate_account_balance($acc);
       }
 
-      \Drupal::messenger()->addStatus("↩️ Đã xóa giao dịch của buổi học và cập nhật lại số dư các tài khoản.");
+      \Drupal::messenger()->addStatus("↩️ Đã xóa giao dịch của buổi học và cập nhật lại lịch sử tài khoản.");
     }
   }
 }
@@ -364,4 +368,53 @@ function sunflower_recalculate_account_balance($account) {
     // Luôn reset flag sau khi chạy xong.
     $running_accounts[$account_id] = FALSE;
   }
+}
+
+/**
+ * Thêm 1 transaction vào danh sách field_transactions của account theo đúng thứ tự thời gian.
+ */
+function sunflower_update_account_transactions(Node $account, Node $txn) {
+  $refs = $account->get('field_transactions')->referencedEntities();
+  $refs[] = $txn;
+
+  // Sắp xếp lại theo thời gian hiệu lực
+  usort($refs, function($a, $b) {
+    $timeA = sunflower_get_transaction_timestamp($a);
+    $timeB = sunflower_get_transaction_timestamp($b);
+    return $timeA <=> $timeB;
+  });
+
+  $account->set('field_transactions', array_map(fn($t) => ['target_id' => $t->id()], $refs));
+  $account->save();
+}
+
+/**
+ * Xóa transaction khỏi danh sách field_transactions của account.
+ */
+function sunflower_remove_transaction_from_account(Node $account, Node $txn) {
+  $items = $account->get('field_transactions')->getValue();
+  $new_items = array_filter($items, fn($i) => $i['target_id'] != $txn->id());
+  $account->set('field_transactions', array_values($new_items));
+  $account->save();
+}
+
+/**
+ * Xác định timestamp thực của 1 transaction (dựa vào date/lesson/study_time).
+ */
+function sunflower_get_transaction_timestamp(Node $txn) {
+  // Ưu tiên field_date
+  if ($txn->hasField('field_date') && !$txn->get('field_date')->isEmpty()) {
+    return strtotime($txn->get('field_date')->value);
+  }
+
+  // Nếu có buổi học, lấy field_study_time
+  if ($txn->hasField('field_lesson') && !$txn->get('field_lesson')->isEmpty()) {
+    $lesson = $txn->get('field_lesson')->entity;
+    if ($lesson && !$lesson->get('field_study_time')->isEmpty()) {
+      return strtotime($lesson->get('field_study_time')->value);
+    }
+  }
+
+  // Fallback: thời gian tạo node
+  return $txn->getCreatedTime();
 }
