@@ -42,6 +42,7 @@
         "drupal/project_browser": "@beta",
         "drupal/recipe_installer_kit": "^1-alpha6@alpha",
         "drupal/views_bulk_operations": "^4.3",
+        "drupal/views_contextual_filters_or": "^1.5",
         "drupal/webform": "@beta"
     },
     "require-dev": {

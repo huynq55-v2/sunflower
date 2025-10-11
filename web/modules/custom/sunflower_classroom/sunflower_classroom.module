@@ -61,7 +61,6 @@ function _sunflower_classroom_create_accounts(\Drupal\node\Entity\Node $entity) 
           'title' => "Tài khoản học sinh: " . $student->label() . ' - ' . $class_label,
           'field_student' => $uid,
           'field_classroom' => $class_id,
-          'field_balance' => 0,
         ]);
         $account->save();
 
@@ -94,7 +93,6 @@ function _sunflower_classroom_create_accounts(\Drupal\node\Entity\Node $entity) 
           'title' => "Tài khoản giáo viên: " . $teacher->label() . ' - ' . $class_label,
           'field_student' => $teacher_uid,
           'field_classroom' => $class_id,
-          'field_balance' => 0,
         ]);
         $account->save();
 
