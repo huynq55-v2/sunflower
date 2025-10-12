@@ -1,0 +1,30 @@
+<?php
+
+use Drupal\node\Entity\Node;
+
+/**
+ * Implements hook_entity_insert().
+ */
+function sunflower_finance_entity_insert(\Drupal\Core\Entity\EntityInterface $entity) {
+  if ($entity instanceof Node) {
+    \Drupal::service('sunflower_finance.account_balance_manager')->updateRelatedAccounts($entity);
+  }
+}
+
+/**
+ * Implements hook_entity_update().
+ */
+function sunflower_finance_entity_update(\Drupal\Core\Entity\EntityInterface $entity) {
+  if ($entity instanceof Node) {
+    \Drupal::service('sunflower_finance.account_balance_manager')->updateRelatedAccounts($entity);
+  }
+}
+
+/**
+ * Implements hook_entity_delete().
+ */
+function sunflower_finance_entity_delete(\Drupal\Core\Entity\EntityInterface $entity) {
+  if ($entity instanceof Node) {
+    \Drupal::service('sunflower_finance.account_balance_manager')->updateRelatedAccounts($entity);
+  }
+}

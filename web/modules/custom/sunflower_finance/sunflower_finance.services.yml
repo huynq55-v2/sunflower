@@ -1,0 +1,4 @@
+services:
+  sunflower_finance.account_balance_manager:
+    class: Drupal\sunflower_finance\Service\AccountBalanceManager
+    arguments: ['@entity_type.manager']

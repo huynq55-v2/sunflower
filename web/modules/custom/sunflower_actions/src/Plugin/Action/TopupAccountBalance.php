@@ -49,7 +49,6 @@ class TopupAccountBalance extends ConfigurableActionBase {
   }
 
   public function execute($entity = NULL) {
-    // Chỉ chạy cho node account.
     if (!$entity instanceof Node || $entity->bundle() !== 'account') {
       return;
     }
@@ -74,38 +73,20 @@ class TopupAccountBalance extends ConfigurableActionBase {
     ]);
 
     $txn_log->setCreatedTime(strtotime($field_date_value) ?: $now);
-    $txn_log->save();
+    $txn_log->save(); // <- Hook `hook_entity_insert` sẽ được kích hoạt ở đây và tự động gọi service tính toán lại số dư.
 
-    // 2️⃣ Cập nhật lại danh sách field_transactions theo đúng thứ tự thời gian.
-    if ($entity->hasField('field_transactions')) {
-      $existing_refs = $entity->get('field_transactions')->referencedEntities();
-
-      // Thêm transaction_log mới vào danh sách, sau đó sắp xếp theo thời gian hiệu lực.
-      $existing_refs[] = $txn_log;
-
-      usort($existing_refs, function ($a, $b) {
-        // Tính timestamp hiệu lực của mỗi transaction.
-        $time_a = self::getEffectiveTimestamp($a);
-        $time_b = self::getEffectiveTimestamp($b);
-        if ($time_a === $time_b) {
-          return $a->id() <=> $b->id();
-        }
-        return $time_a <=> $time_b;
-      });
-
-      $new_refs = [];
-      foreach ($existing_refs as $ref) {
-        $new_refs[] = ['target_id' => $ref->id()];
-      }
-
-      $entity->set('field_transactions', $new_refs);
-      $entity->save();
+    // 2️⃣ Cập nhật lại danh sách field_transactions (nếu bạn vẫn cần trường này).
+    // Lưu ý: hàm `sunflower_update_account_transactions` cũng có `save()`.
+    // Điều này cũng sẽ kích hoạt `hook_entity_update` và service sẽ chạy,
+    // nhưng cơ chế khóa đã ngăn chặn lặp.
+    if (function_exists('sunflower_update_account_transactions')) {
+      sunflower_update_account_transactions($entity, $txn_log);
     }
-
-    // 3️⃣ Gọi hàm tính lại toàn bộ lịch sử giao dịch.
-    if (function_exists('sunflower_recalculate_account_balance')) {
-      sunflower_recalculate_account_balance($entity);
-    }
+    
+    // 3️⃣ KHÔNG cần gọi hàm tính toán lại ở đây nữa.
+    // if (function_exists('sunflower_recalculate_account_balance')) {
+    //   sunflower_recalculate_account_balance($entity);
+    // }
 
     // 4️⃣ Hiển thị thông báo.
     \Drupal::messenger()->addStatus(t('✅ Transaction of %amount has been applied to %account.', [

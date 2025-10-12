@@ -1,0 +1,7 @@
+name: 'Sunflower Finance'
+type: module
+description: 'Quản lý và cập nhật số dư tài khoản dựa trên các giao dịch chưa chốt sổ.'
+package: 'Sunflower'
+core_version_requirement: ^10 || ^11
+dependencies:
+  - node

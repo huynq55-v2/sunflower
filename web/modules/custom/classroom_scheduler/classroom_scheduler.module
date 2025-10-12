@@ -58,7 +58,8 @@ function classroom_scheduler_node_update(NodeInterface $node) {
       // ✅ Thêm transaction này vào field_transactions (và giữ thứ tự thời gian)
       sunflower_update_account_transactions($account, $txn);
 
-      sunflower_recalculate_account_balance($account);
+      // sunflower_recalculate_account_balance($account);
+      \Drupal::service('sunflower_finance.account_balance_manager')->updateAccountBalance($account->id());
     }
 
     // 🧩 Giáo viên
@@ -79,7 +80,8 @@ function classroom_scheduler_node_update(NodeInterface $node) {
       $txn->save();
 
       sunflower_update_account_transactions($teacher_account, $txn);
-      sunflower_recalculate_account_balance($teacher_account);
+      // sunflower_recalculate_account_balance($teacher_account);
+      \Drupal::service('sunflower_finance.account_balance_manager')->updateAccountBalance($teacher_account->id());
     }
 
     \Drupal::messenger()->addStatus("✅ Đã tạo giao dịch cho buổi học {$lesson_label}.");
@@ -114,7 +116,8 @@ function classroom_scheduler_node_update(NodeInterface $node) {
       }
 
       foreach ($affected_accounts as $acc) {
-        sunflower_recalculate_account_balance($acc);
+        // sunflower_recalculate_account_balance($acc);
+        \Drupal::service('sunflower_finance.account_balance_manager')->updateAccountBalance($acc->id());
       }
 
       \Drupal::messenger()->addStatus("↩️ Đã xóa giao dịch của buổi học và cập nhật lại lịch sử tài khoản.");
