@@ -123,6 +123,44 @@ function classroom_scheduler_node_update(NodeInterface $node) {
 }
 
 /**
+ * Hook chạy trước khi node được lưu.
+ * Mục tiêu: chặn revert nếu có giao dịch đã tính tiền.
+ */
+function classroom_scheduler_node_presave(NodeInterface $node) {
+  if ($node->bundle() !== 'lesson' || !$node->original) {
+    return;
+  }
+
+  $old_value = $node->original->get('field_is_happened')->value ?? 0;
+  $new_value = $node->get('field_is_happened')->value ?? 0;
+
+  if ($old_value == 1 && $new_value == 0) {
+    $lesson_label = $node->label();
+
+    // Tìm tất cả giao dịch của buổi học này.
+    $query = \Drupal::entityQuery('node')
+      ->condition('type', 'transaction')
+      ->condition('field_lesson', $node->id())
+      ->accessCheck(FALSE);
+    $txn_ids = $query->execute();
+
+    if (!empty($txn_ids)) {
+      $paid_txn_ids = \Drupal::entityQuery('node')
+        ->condition('nid', $txn_ids, 'IN')
+        ->condition('field_has_calculated_money', TRUE)
+        ->accessCheck(FALSE)
+        ->execute();
+
+      if (!empty($paid_txn_ids)) {
+        \Drupal::messenger()->addError("❌ Buổi học {$lesson_label} không thể revert vì có giao dịch đã tính tiền cho người dùng.");
+        // Giữ nguyên trạng thái cũ → không revert được.
+        $node->set('field_is_happened', 1);
+      }
+    }
+  }
+}
+
+/**
  * Helper: Lấy Account node cho user + classroom.
  *
  * @param int $uid

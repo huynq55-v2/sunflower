@@ -29,12 +29,7 @@ class ToggleBooleanField extends ActionBase {
 
         $entity->set($field_name, $new_value);
         $entity->save();
-
-        \Drupal::messenger()->addMessage(t('Đã chuyển "@title" từ @old → @new.', [
-          '@title' => $entity->label(),
-          '@old' => $current ? 'Có học' : 'Chưa học',
-          '@new' => $new_value ? 'Có học' : 'Chưa học',
-        ]));
+        
       }
     }
   }
