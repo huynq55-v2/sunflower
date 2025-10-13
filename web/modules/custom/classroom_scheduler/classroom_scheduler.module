@@ -12,34 +12,81 @@ function classroom_scheduler_node_update(NodeInterface $node) {
     return;
   }
 
+  // Ghi log để xác nhận hook được gọi cho đúng buổi học
+  \Drupal::logger('classroom_scheduler')->notice('hook_node_update triggered for lesson: @label (ID: @id)', [
+    '@label' => $node->label(),
+    '@id' => $node->id()
+  ]);
+
+  // Kiểm tra xem node->original có tồn tại không
+  if (!isset($node->original)) {
+    \Drupal::logger('classroom_scheduler')->warning('Node original property not found on update.');
+    return;
+  }
+
   $old_value = $node->original->get('field_is_happened')->value ?? 0;
   $new_value = $node->get('field_is_happened')->value ?? 0;
+
+  // Ghi log giá trị cũ và mới
+  \Drupal::logger('classroom_scheduler')->notice('field_is_happened changed from @old to @new.', [
+    '@old' => $old_value,
+    '@new' => $new_value
+  ]);
+
+  // Chỉ thực hiện khi có sự thay đổi giá trị
+  if ($old_value == $new_value) {
+    return;
+  }
 
   /** @var \Drupal\node\NodeInterface $classroom */
   $classroom = $node->get('field_classroom')->entity;
   if (!$classroom) {
-    \Drupal::messenger()->addError('Không tìm thấy lớp học.');
+    $message = 'Không tìm thấy lớp học được tham chiếu từ buổi học.';
+    \Drupal::messenger()->addError($message);
+    \Drupal::logger('classroom_scheduler')->error($message);
     return;
   }
+  
+  // Ghi log thông tin lớp học
+  \Drupal::logger('classroom_scheduler')->notice('Found classroom: @label', ['@label' => $classroom->label()]);
+
 
   $fee = (int) $classroom->get('field_fee')->value;
   $teacher = $classroom->get('field_teacher')->entity ?? NULL;
   $students = $node->get('field_student_list')->referencedEntities();
 
   if ($fee <= 0 || !$teacher) {
-    \Drupal::messenger()->addError('Lớp học chưa có học phí hoặc giáo viên.');
+    $message = 'Lớp học (@class) chưa có học phí (Fee: @fee) hoặc giáo viên (Teacher: @teacher). Dừng tạo giao dịch.';
+    \Drupal::messenger()->addError(t('Lớp học chưa có học phí hoặc giáo viên.'));
+    \Drupal::logger('classroom_scheduler')->warning($message, [
+      '@class' => $classroom->label(),
+      '@fee' => $fee,
+      '@teacher' => $teacher ? $teacher->label() : 'NULL',
+    ]);
     return;
   }
-
+  
   $lesson_label = $node->label();
   $study_time = $node->get('field_study_time')->value;
   $timestamp = $study_time ? strtotime($study_time) : time();
 
   // ========== CASE 1: "chưa học" -> "đã học" ==========
   if ($old_value == 0 && $new_value == 1) {
+    \Drupal::logger('classroom_scheduler')->notice('CASE 1: "chưa học" -> "đã học". Starting to create transactions.');
+
     foreach ($students as $student) {
       $account = sunflower_get_account_for($student->id(), $classroom->id());
-      if (!$account) continue;
+      if (!$account) {
+        \Drupal::logger('classroom_scheduler')->warning('Không tìm thấy tài khoản cho học sinh @student trong lớp @class. Bỏ qua.', [
+          '@student' => $student->label(),
+          '@class' => $classroom->label(),
+        ]);
+        continue;
+      }
+      \Drupal::logger('classroom_scheduler')->notice('Processing student: @student, account: @account', [
+        '@student' => $student->label(),
+        '@account' => $account->label(),
+      ]);
 
       $fee_amount = $fee;
 
@@ -50,16 +97,20 @@ function classroom_scheduler_node_update(NodeInterface $node) {
         'field_account' => ['target_id' => $account->id()],
         'field_amount' => $fee_amount,
         'field_type' => 'debit',
-        'field_date' => substr($study_time, 0, 10),
+        'field_date' => $study_time ? substr($study_time, 0, 10) : date('Y-m-d'),
       ]);
       $txn->setCreatedTime($timestamp);
       $txn->save();
 
-      // ✅ Thêm transaction này vào field_transactions (và giữ thứ tự thời gian)
+      \Drupal::logger('classroom_scheduler')->notice('CREATED transaction node @id for student @student.', [
+        '@id' => $txn->id(),
+        '@student' => $student->label(),
+      ]);
+
       sunflower_update_account_transactions($account, $txn);
 
-      // sunflower_recalculate_account_balance($account);
-      \Drupal::service('sunflower_finance.account_balance_manager')->updateAccountBalance($account->id());
+      // KHÔNG cần gọi update balance ở đây nữa. Hook entity_insert/update của `sunflower_finance` sẽ tự động làm việc này.
+      // \Drupal::service('sunflower_finance.account_balance_manager')->updateAccountBalance($account->id());
     }
 
     // 🧩 Giáo viên
@@ -67,21 +118,26 @@ function classroom_scheduler_node_update(NodeInterface $node) {
     if ($teacher_account) {
       $total_credit = count($students) * $fee;
 
-      $txn = Node::create([
+      $txn_teacher = Node::create([
         'type' => 'transaction',
         'title' => "Thu nhập {$lesson_label} - {$teacher->label()}",
         'field_lesson' => ['target_id' => $node->id()],
         'field_account' => ['target_id' => $teacher_account->id()],
         'field_amount' => $total_credit,
         'field_type' => 'credit',
-        'field_date' => substr($study_time, 0, 10),
+        'field_date' => $study_time ? substr($study_time, 0, 10) : date('Y-m-d'),
       ]);
-      $txn->setCreatedTime($timestamp);
-      $txn->save();
+      $txn_teacher->setCreatedTime($timestamp);
+      $txn_teacher->save();
+      
+      \Drupal::logger('classroom_scheduler')->notice('CREATED transaction node @id for teacher @teacher.', [
+        '@id' => $txn_teacher->id(),
+        '@teacher' => $teacher->label(),
+      ]);
 
-      sunflower_update_account_transactions($teacher_account, $txn);
-      // sunflower_recalculate_account_balance($teacher_account);
-      \Drupal::service('sunflower_finance.account_balance_manager')->updateAccountBalance($teacher_account->id());
+      sunflower_update_account_transactions($teacher_account, $txn_teacher);
+      // KHÔNG cần gọi update balance ở đây nữa.
+      // \Drupal::service('sunflower_finance.account_balance_manager')->updateAccountBalance($teacher_account->id());
     }
 
     \Drupal::messenger()->addStatus("✅ Đã tạo giao dịch cho buổi học {$lesson_label}.");
@@ -89,6 +145,9 @@ function classroom_scheduler_node_update(NodeInterface $node) {
 
   // ========== CASE 2: "đã học" -> "chưa học" ==========
   if ($old_value == 1 && $new_value == 0) {
+    \Drupal::logger('classroom_scheduler')->notice('CASE 2: "đã học" -> "chưa học". Starting to delete transactions.');
+    
+    // ... (phần code case 2 của bạn) ...
     $query = \Drupal::entityQuery('node')
       ->condition('type', 'transaction')
       ->condition('field_lesson', $node->id())
@@ -103,21 +162,23 @@ function classroom_scheduler_node_update(NodeInterface $node) {
         $account = $txn->get('field_account')->entity;
         if (!$account) continue;
 
-        $amount = (int) $txn->get('field_amount')->value;
-        $type = $txn->get('field_type')->value;
+        // Lưu ID tài khoản để tính toán lại sau khi xóa hết giao dịch
+        $affected_accounts[$account->id()] = $account;
 
-        $account->save();
-
-        // ✅ Xóa transaction khỏi field_transactions
+        // Xóa transaction khỏi field_transactions trước
         sunflower_remove_transaction_from_account($account, $txn);
 
-        $affected_accounts[$account->id()] = $account;
-        $txn->delete();
+        $txn->delete(); // <- Hook entity_delete của `sunflower_finance` sẽ được gọi ở đây.
+        
+        \Drupal::logger('classroom_scheduler')->notice('DELETED transaction node for account @account.', [
+            '@account' => $account->label(),
+        ]);
       }
-
+      
+      // Hook entity_delete đã lo việc cập nhật balance rồi, nên vòng lặp này có thể không cần thiết nữa
+      // Nhưng để cho chắc chắn, bạn có thể gọi lại 1 lần sau khi mọi thứ đã xóa xong.
       foreach ($affected_accounts as $acc) {
-        // sunflower_recalculate_account_balance($acc);
-        \Drupal::service('sunflower_finance.account_balance_manager')->updateAccountBalance($acc->id());
+         \Drupal::service('sunflower_finance.account_balance_manager')->updateAccountBalance($acc->id());
       }
 
       \Drupal::messenger()->addStatus("↩️ Đã xóa giao dịch của buổi học và cập nhật lại lịch sử tài khoản.");

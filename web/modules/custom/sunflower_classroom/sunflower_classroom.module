@@ -1,106 +1,124 @@
 <?php
 
 use Drupal\node\Entity\Node;
+use Drupal\Core\Entity\EntityInterface;
 
 /**
  * Implements hook_entity_presave().
+ *
+ * Triggered before a node is saved.
  */
-function sunflower_classroom_entity_presave(\Drupal\Core\Entity\EntityInterface $entity) {
-  // Chỉ xử lý với content type "classroom"
-  if ($entity->getEntityTypeId() !== 'node' || $entity->bundle() !== 'classroom') {
+function sunflower_classroom_entity_presave(EntityInterface $entity) {
+  // Chỉ xử lý với content type "classroom" và "lesson".
+  if ($entity->getEntityTypeId() !== 'node' || !in_array($entity->bundle(), ['classroom', 'lesson'])) {
     return;
   }
 
-  // Nếu là node mới, Drupal chưa gán ID → xử lý sau khi insert
-  if ($entity->isNew()) {
-    \Drupal::service('module_handler')->invoke('sunflower_classroom', 'pending_create_accounts', [$entity]);
-    return;
+  // Nếu là node mới, Drupal chưa gán ID → xử lý sau khi insert.
+  // Nếu là node đã tồn tại (edit) → tạo account ngay.
+  if (!$entity->isNew()) {
+    _sunflower_school_create_user_accounts($entity);
   }
-
-  // Nếu là node đã tồn tại (edit) → tạo account ngay
-  _sunflower_classroom_create_accounts($entity);
 }
 
 /**
  * Implements hook_entity_insert().
+ *
+ * Triggered after a new node is saved.
  */
-function sunflower_classroom_entity_insert(\Drupal\Core\Entity\EntityInterface $entity) {
-  if ($entity->getEntityTypeId() !== 'node' || $entity->bundle() !== 'classroom') {
+function sunflower_classroom_entity_insert(EntityInterface $entity) {
+  // Chỉ xử lý với content type "classroom" và "lesson".
+  if ($entity->getEntityTypeId() !== 'node' || !in_array($entity->bundle(), ['classroom', 'lesson'])) {
     return;
   }
 
-  _sunflower_classroom_create_accounts($entity);
+  _sunflower_school_create_user_accounts($entity);
 }
 
 /**
- * Tạo account cho học sinh và giáo viên của lớp học.
+ * Tạo tài khoản cho người dùng (học sinh và giáo viên) liên quan đến một lớp học.
+ *
+ * Hàm này được gọi khi một node 'classroom' hoặc 'lesson' được tạo/cập nhật.
+ *
+ * @param \Drupal\node\Entity\Node $entity
+ *   Node được tạo hoặc cập nhật ('classroom' hoặc 'lesson').
  */
-function _sunflower_classroom_create_accounts(\Drupal\node\Entity\Node $entity) {
-  $class_id = $entity->id();
-  $class_label = $entity->label();
+function _sunflower_school_create_user_accounts(Node $entity) {
+  $users_to_process = [];
+  $classroom_node = NULL;
 
-  // 🧩 Tạo account cho học sinh
-  if ($entity->hasField('field_student_list')) {
-    $student_refs = $entity->get('field_student_list')->referencedEntities();
-
-    foreach ($student_refs as $student) {
-      $uid = $student->id();
-
-      // Kiểm tra account học sinh + lớp này đã tồn tại chưa
-      $query = \Drupal::entityQuery('node')
-        ->condition('type', 'account')
-        ->condition('field_student', $uid)
-        ->condition('field_classroom', $class_id)
-        ->accessCheck(FALSE);
-
-      $existing = $query->execute();
-
-      if (empty($existing)) {
-        $account = Node::create([
-          'type' => 'account',
-          'title' => "Tài khoản học sinh: " . $student->label() . ' - ' . $class_label,
-          'field_student' => $uid,
-          'field_classroom' => $class_id,
-        ]);
-        $account->save();
-
-        \Drupal::logger('sunflower_classroom')->notice('Đã tạo tài khoản học sinh cho @student trong lớp @class', [
-          '@student' => $student->label(),
-          '@class' => $class_label,
-        ]);
+  // Xác định content type và thu thập danh sách người dùng cần xử lý.
+  $bundle = $entity->bundle();
+  if ($bundle === 'classroom') {
+    $classroom_node = $entity;
+    // Lấy danh sách học sinh từ lớp học.
+    if ($entity->hasField('field_student_list') && !$entity->get('field_student_list')->isEmpty()) {
+      $users_to_process = array_merge($users_to_process, $entity->get('field_student_list')->referencedEntities());
+    }
+    // Lấy giáo viên từ lớp học.
+    if ($entity->hasField('field_teacher') && !$entity->get('field_teacher')->isEmpty()) {
+      $users_to_process[] = $entity->get('field_teacher')->entity;
+    }
+  } elseif ($bundle === 'lesson') {
+    // Nếu là buổi học, lấy thông tin lớp học được tham chiếu.
+    if ($entity->hasField('field_classroom') && !$entity->get('field_classroom')->isEmpty()) {
+      $classroom_node = $entity->get('field_classroom')->entity;
+      if ($classroom_node) {
+        // Lấy danh sách học sinh từ buổi học.
+        if ($entity->hasField('field_student_list') && !$entity->get('field_student_list')->isEmpty()) {
+          $users_to_process = array_merge($users_to_process, $entity->get('field_student_list')->referencedEntities());
+        }
+        // Lấy giáo viên từ lớp học liên quan.
+        if ($classroom_node->hasField('field_teacher') && !$classroom_node->get('field_teacher')->isEmpty()) {
+          $users_to_process[] = $classroom_node->get('field_teacher')->entity;
+        }
       }
     }
   }
 
-  // 🧩 Tạo account cho giáo viên
-  if ($entity->hasField('field_teacher') && !$entity->get('field_teacher')->isEmpty()) {
-    $teacher = $entity->get('field_teacher')->entity;
-    if ($teacher) {
-      $teacher_uid = $teacher->id();
+  // Nếu không có thông tin lớp học hoặc không có người dùng nào thì dừng lại.
+  if (!$classroom_node || empty($users_to_process)) {
+    return;
+  }
 
-      // Kiểm tra account giáo viên + lớp này đã tồn tại chưa
-      $query = \Drupal::entityQuery('node')
-        ->condition('type', 'account')
-        ->condition('field_student', $teacher_uid)
-        ->condition('field_classroom', $class_id)
-        ->accessCheck(FALSE);
+  $class_id = $classroom_node->id();
+  $class_label = $classroom_node->label();
 
-      $existing_teacher_accounts = $query->execute();
+  // Loại bỏ các user bị trùng lặp.
+  $unique_users = [];
+  foreach ($users_to_process as $user) {
+    if ($user) {
+      $unique_users[$user->id()] = $user;
+    }
+  }
 
-      if (empty($existing_teacher_accounts)) {
-        $account = Node::create([
-          'type' => 'account',
-          'title' => "Tài khoản giáo viên: " . $teacher->label() . ' - ' . $class_label,
-          'field_student' => $teacher_uid,
-          'field_classroom' => $class_id,
-        ]);
-        $account->save();
+  // Duyệt qua danh sách người dùng và tạo tài khoản nếu chưa có.
+  foreach ($unique_users as $user) {
+    $uid = $user->id();
+    $user_label = $user->label();
 
-        \Drupal::logger('sunflower_classroom')->notice('Đã tạo tài khoản giáo viên @teacher cho lớp @class', [
-          '@teacher' => $teacher->label(),
-          '@class' => $class_label,
-        ]);
-      }
+    // Kiểm tra xem tài khoản cho user này trong lớp học này đã tồn tại chưa.
+    $query = \Drupal::entityQuery('node')
+      ->condition('type', 'account')
+      ->condition('field_student', $uid) // Field này lưu User (cả học sinh và giáo viên)
+      ->condition('field_classroom', $class_id)
+      ->accessCheck(FALSE);
+    $existing_accounts = $query->execute();
+
+    if (empty($existing_accounts)) {
+      // Nếu chưa tồn tại, tạo một node 'account' mới.
+      $account = Node::create([
+        'type' => 'account',
+        'title' => "Tài khoản cho: " . $user_label . ' - Lớp: ' . $class_label,
+        'field_student' => $uid,
+        'field_classroom' => $class_id,
+      ]);
+      $account->save();
+
+      \Drupal::logger('sunflower_classroom')->notice('Đã tạo tài khoản cho @user trong lớp @class', [
+        '@user' => $user_label,
+        '@class' => $class_label,
+      ]);
     }
   }
 }
