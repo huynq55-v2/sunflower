@@ -11,7 +11,7 @@ use Drupal\user\Entity\User;
 /**
  * @Action(
  *   id = "finalize_account_balance",
- *   label = @Translation("Chốt sổ tài khoản (giáo viên hoặc học sinh)"),
+ *   label = @Translation("Chốt sổ tài khoản giáo viên"),
  *   type = "user"
  * )
  */
@@ -27,7 +27,7 @@ class FinalizeAccountBalance extends ActionBase {
   }
 
   /**
-   * Tính và chốt sổ cho một user (giáo viên hoặc học sinh).
+   * Tính và chốt sổ cho một user giáo viên.
    */
   protected function finalizeBalance(User $user) {
     $total_balance = 0;
@@ -94,7 +94,11 @@ class FinalizeAccountBalance extends ActionBase {
     // ✅ Tạo node teacher_income (dùng chung cho cả teacher và student).
     $income_node = Node::create([
       'type' => 'teacher_income',
-      'title' => 'Chốt sổ - ' . $user->getDisplayName() . ' (' . date('Y-m-d H:i') . ')',
+      'title' => 'Chốt sổ - ' 
+  . $user->getDisplayName()
+  . ' - ' 
+  . ($user->hasField('field_full_name') && !$user->get('field_full_name')->isEmpty() ? $user->get('field_full_name')->value : '')
+  . ' (' . date('Y-m-d H:i') . ')',
       'field_teacher' => $user->id(),
       'field_amount' => -$total_balance,
       'field_account' => $user_accounts,

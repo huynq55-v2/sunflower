@@ -92,7 +92,10 @@ function classroom_scheduler_node_update(NodeInterface $node) {
 
       $txn = Node::create([
         'type' => 'transaction',
-        'title' => "Học phí {$lesson_label} - {$student->label()}",
+        'title' => "Học phí {$lesson_label} - {$student->label()}" .
+          ($student->hasField('field_full_name') && !$student->get('field_full_name')->isEmpty()
+            ? ' (' . $student->get('field_full_name')->value . ')'
+            : ''),
         'field_lesson' => ['target_id' => $node->id()],
         'field_account' => ['target_id' => $account->id()],
         'field_amount' => $fee_amount,
@@ -120,7 +123,10 @@ function classroom_scheduler_node_update(NodeInterface $node) {
 
       $txn_teacher = Node::create([
         'type' => 'transaction',
-        'title' => "Thu nhập {$lesson_label} - {$teacher->label()}",
+        'title' => "Thu nhập {$lesson_label} - {$teacher->label()}" .
+          ($teacher->hasField('field_full_name') && !$teacher->get('field_full_name')->isEmpty()
+            ? ' (' . $teacher->get('field_full_name')->value . ')'
+            : ''),
         'field_lesson' => ['target_id' => $node->id()],
         'field_account' => ['target_id' => $teacher_account->id()],
         'field_amount' => $total_credit,

@@ -64,7 +64,15 @@ class TopupAccountBalance extends ConfigurableActionBase {
     // 1️⃣ Tạo node transaction_log.
     $txn_log = Node::create([
       'type' => 'transaction_log',
-      'title' => sprintf('%s for %s (%+.0f)', ($amount >= 0 ? 'Topup' : 'Deduct'), $entity->label(), $amount),
+      'title' => sprintf(
+        '%s for %s%s (%+.0f)',
+        ($amount >= 0 ? 'Topup' : 'Deduct'),
+        $entity->label(),
+        ($entity->hasField('field_full_name') && !$entity->get('field_full_name')->isEmpty())
+          ? ' (' . $entity->get('field_full_name')->value . ')'
+          : '',
+        $amount
+      ),
       'field_account' => ['target_id' => $entity->id()],
       'field_amount' => $amount,
       'field_cashier' => ['target_id' => $cashier->id()],

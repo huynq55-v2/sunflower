@@ -97,6 +97,22 @@ function _sunflower_school_create_user_accounts(Node $entity) {
     $uid = $user->id();
     $user_label = $user->label();
 
+    // Lấy họ và tên (field_full_name) nếu có
+    $full_name = '';
+    if ($user->hasField('field_full_name') && !$user->get('field_full_name')->isEmpty()) {
+      $full_name = $user->get('field_full_name')->value;
+    }
+
+    // Ghép lại tiêu đề
+    $title = "Tài khoản cho: " . $user_label;
+
+    if (!empty($full_name)) {
+      $title .= " (" . $full_name . ")";
+    }
+
+
+    $title .= ' - Lớp: ' . $class_label;
+
     // Kiểm tra xem tài khoản cho user này trong lớp học này đã tồn tại chưa.
     $query = \Drupal::entityQuery('node')
       ->condition('type', 'account')
@@ -109,7 +125,7 @@ function _sunflower_school_create_user_accounts(Node $entity) {
       // Nếu chưa tồn tại, tạo một node 'account' mới.
       $account = Node::create([
         'type' => 'account',
-        'title' => "Tài khoản cho: " . $user_label . ' - Lớp: ' . $class_label,
+        'title' => $title,
         'field_student' => $uid,
         'field_classroom' => $class_id,
       ]);
