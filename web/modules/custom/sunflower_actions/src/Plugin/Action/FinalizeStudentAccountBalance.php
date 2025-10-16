@@ -114,7 +114,7 @@ class FinalizeStudentAccountBalance extends ActionBase {
    */
   public function access($object, AccountInterface $account = NULL, $return_as_object = FALSE) {
     $account = $account ?: \Drupal::currentUser();
-    $allowed = $account->hasRole('manager') || $account->hasRole('cashier');
+    $allowed = $account->hasRole('manager') || $account->hasRole('cashier') || $account->hasRole('administrator');
     $result = AccessResult::allowedIf($allowed);
     return $return_as_object ? $result : $result->isAllowed();
   }

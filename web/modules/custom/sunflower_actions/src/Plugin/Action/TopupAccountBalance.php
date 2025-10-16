@@ -131,7 +131,7 @@ class TopupAccountBalance extends ConfigurableActionBase {
 
   public function access($object, $account = NULL, $return_as_object = FALSE) {
     $account = $account ?: \Drupal::currentUser();
-    $allowed = $account->hasRole('cashier') || $account->hasRole('manager');
+    $allowed = $account->hasRole('cashier') || $account->hasRole('manager') || $account->hasRole('administrator');
     return $return_as_object ? AccessResult::allowedIf($allowed) : $allowed;
   }
 }
