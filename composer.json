@@ -40,6 +40,7 @@
         "drupal/field_permissions": "^1.4",
         "drupal/paragraphs": "^1.19",
         "drupal/project_browser": "@beta",
+        "drupal/quick_data": "^2.0",
         "drupal/recipe_installer_kit": "^1-alpha6@alpha",
         "drupal/views_bulk_operations": "^4.3",
         "drupal/views_contextual_filters_or": "^1.5",
