@@ -1,0 +1,45 @@
+<?php
+
+use Drupal\node\Entity\Node;
+use Drupal\Core\Entity\EntityInterface;
+
+/**
+ * Implements hook_views_post_execute().
+ */
+function sunflower_lesson_views_post_execute(\Drupal\views\ViewExecutable $view) {
+  if ($view->id() !== 'student_by_lesson_management') {
+    return;
+  }
+
+  // Lấy Node ID lớp học từ URL argument
+  $class_nid = $view->args[0] ?? 0;
+  if (!$class_nid) {
+    return;
+  }
+
+  $class_node = \Drupal\node\Entity\Node::load($class_nid);
+  if (!$class_node || !$class_node->hasField('field_student_list')) {
+    return;
+  }
+
+  // Lấy UID các học sinh trong lesson
+  $student_refs = $class_node->get('field_student_list')->referencedEntities();
+  $student_uids = array_map(fn($u) => $u->id(), $student_refs);
+
+  // Thêm cột Yes/No cho mỗi row
+  foreach ($view->result as $row_index => $row) {
+    if (isset($row->_entity) && $row->_entity instanceof \Drupal\user\UserInterface) {
+      $uid = $row->_entity->id();
+      $row->in_class = in_array($uid, $student_uids) ? 'Yes' : 'No';
+    }
+  }
+}
+
+function sunflower_lesson_views_pre_render(\Drupal\views\ViewExecutable $view) {
+  if ($view->id() === 'student_by_lesson_management') {
+    $args = $view->args;
+    if (!empty($args[0]) && is_numeric($args[0])) {
+      $_SESSION['current_lesson_nid'] = (int) $args[0];
+    }
+  }
+}
