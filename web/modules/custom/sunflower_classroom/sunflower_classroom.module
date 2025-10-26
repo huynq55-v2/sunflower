@@ -179,3 +179,31 @@ function sunflower_classroom_views_pre_render(\Drupal\views\ViewExecutable $view
     }
   }
 }
+
+use Drupal\views\ViewExecutable;
+
+/**
+ * Implements hook_views_pre_execute().
+ */
+function sunflower_classroom_views_pre_execute(ViewExecutable $view) {
+  if ($view->id() === 'student_list_by_class' && $view->current_display === 'data_export_1') {
+    if (!empty($view->args[0]) && is_numeric($view->args[0])) {
+      $node = \Drupal::entityTypeManager()->getStorage('node')->load($view->args[0]);
+      if ($node) {
+        // Đặt lại title của view để token [view:title] dùng được.
+        $view->setTitle($node->label());
+      }
+    }
+  }
+
+  // View: Danh sách tài khoản.
+  if ($view->id() === 'account_list' && $view->current_display === 'data_export_1') {
+    if (!empty($view->args[0]) && is_numeric($view->args[0])) {
+      $user = \Drupal::entityTypeManager()->getStorage('user')->load($view->args[0]);
+      if ($user) {
+        // Đặt tiêu đề của view bằng tên người dùng.
+        $view->setTitle($user->getDisplayName() . ' ' . $user->get('field_full_name')->value);
+      }
+    }
+  }
+}
