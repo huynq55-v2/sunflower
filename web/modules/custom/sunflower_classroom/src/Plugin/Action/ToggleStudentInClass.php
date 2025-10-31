@@ -23,47 +23,24 @@ class ToggleStudentInClass extends ActionBase {
    * {@inheritdoc}
    */
   public function buildConfigurationForm(array $form, FormStateInterface $form_state) {
-    $nid = NULL;
+    $request = \Drupal::request();
+    $session = $request->getSession();
 
-    // 1️⃣ Thử lấy từ route parameter
-    $route_nid = \Drupal::routeMatch()->getParameter('nid');
-    if (is_numeric($route_nid)) {
-      $nid = (int) $route_nid;
-    }
+    // Lấy class_nid từ route, query, hoặc session Symfony
+    $nid = \Drupal::routeMatch()->getParameter('nid')
+      ?? ($request->query->get('nid'))
+      ?? $session->get('sunflower_current_class');
 
-    // 2️⃣ Thử lấy từ query string ?nid=123
-    if (!$nid && isset($_GET['nid']) && is_numeric($_GET['nid'])) {
-      $nid = (int) $_GET['nid'];
-    }
-
-    // 3️⃣ Thử lấy từ session (nếu có)
-    if (!$nid && isset($_SESSION['current_class_nid'])) {
-      $nid = (int) $_SESSION['current_class_nid'];
-    }
-
-    // 4️⃣ Nếu vẫn không có thì lấy từ URL thô (cũ)
-    if (!$nid) {
-      $request_path = \Drupal::request()->getPathInfo();
-      $parts = explode('/', trim($request_path, '/'));
-      $last_part = end($parts);
-      if (is_numeric($last_part)) {
-        $nid = (int) $last_part;
-      }
-    }
-
-    // 5️⃣ Lưu vào session để lần sau có thể dùng lại
-    if ($nid) {
-      $_SESSION['current_class_nid'] = $nid;
-    }
-
-    $form['class_nid'] = [
-      '#type' => 'hidden',
-      '#value' => $nid,
-    ];
+    // === Debug info ===
+    \Drupal::logger('sunflower_classroom')->debug('buildConfigurationForm: route nid=@route, query nid=@query, session nid=@session, final nid=@nid', [
+      '@nid' => $nid,
+    ]);
+    
+    $form['class_nid'] = ['#type' => 'hidden', '#value' => $nid];
 
     if (empty($nid)) {
       $form['warning'] = [
-        '#markup' => '<div class="messages messages--warning">⚠️ Không xác định được lớp học từ URL. Hãy đảm bảo URL có dạng /student-by-class-management/[nid] hoặc thêm ?nid=123.</div>',
+        '#markup' => '<div class="messages messages--warning">⚠️ Không xác định được lớp học. URL phải có dạng /student-by-class-management/[nid] hoặc ?nid=123.</div>',
       ];
     }
 
@@ -74,16 +51,10 @@ class ToggleStudentInClass extends ActionBase {
    * {@inheritdoc}
    */
   public function execute($entity = NULL) {
-    if (!$entity instanceof User) {
-      return;
-    }
+    if (!$entity instanceof User) return;
 
-    $class_nid = $this->configuration['class_nid'] ?? NULL;
-
-    // Nếu class_nid vẫn trống, thử lấy lại từ session.
-    if (!$class_nid && isset($_SESSION['current_class_nid'])) {
-      $class_nid = $_SESSION['current_class_nid'];
-    }
+    // Lấy class_nid trực tiếp từ form value
+    $class_nid = $this->configuration['class_nid'] ?? 0;
 
     if (!$class_nid || !is_numeric($class_nid)) {
       \Drupal::messenger()->addError('Không xác định được lớp học.');
@@ -96,28 +67,22 @@ class ToggleStudentInClass extends ActionBase {
       return;
     }
 
-    $target_ids = array_column($node->get('field_student_list')->getValue(), 'target_id');
+    $uids = array_column($node->get('field_student_list')->getValue(), 'target_id');
     $uid = $entity->id();
+    $in_class = in_array($uid, $uids);
 
-    // Xác định hành động (thêm hay gỡ)
-    $is_in_class = TRUE;
-    if (in_array($uid, $target_ids)) {
-      // Gỡ học sinh ra.
-      $target_ids = array_diff($target_ids, [$uid]);
-      $is_in_class = FALSE;
-      \Drupal::messenger()->addMessage(t('Đã gỡ học sinh @name khỏi lớp.', ['@name' => $entity->getDisplayName()]));
-    } else {
-      // Thêm học sinh vào lớp.
-      $target_ids[] = $uid;
-      $is_in_class = TRUE;
-      \Drupal::messenger()->addMessage(t('Đã thêm học sinh @name vào lớp.', ['@name' => $entity->getDisplayName()]));
-    }
-
-    // Cập nhật danh sách học sinh trong lớp.
-    $node->set('field_student_list', array_map(fn($id) => ['target_id' => $id], $target_ids));
+    // Toggle
+    $in_class ? $uids = array_diff($uids, [$uid]) : $uids[] = $uid;
+    $node->set('field_student_list', array_map(fn($id) => ['target_id' => $id], $uids));
     $node->save();
 
-    // === Cập nhật field_is_in_class trong Account tương ứng ===
+    \Drupal::messenger()->addMessage(
+      $in_class
+        ? t('Đã gỡ học sinh @name khỏi lớp.', ['@name' => $entity->getDisplayName()])
+        : t('Đã thêm học sinh @name vào lớp.', ['@name' => $entity->getDisplayName()])
+    );
+
+    // Cập nhật field_is_in_class
     $accounts = Drupal::entityTypeManager()
       ->getStorage('node')
       ->loadByProperties([
@@ -126,17 +91,15 @@ class ToggleStudentInClass extends ActionBase {
         'field_classroom' => $class_nid,
       ]);
 
-    if (!empty($accounts)) {
-      foreach ($accounts as $account_node) {
-        if ($account_node->hasField('field_is_in_class')) {
-          $account_node->set('field_is_in_class', $is_in_class ? 1 : 0);
-          $account_node->save();
-        }
+    foreach ($accounts as $account_node) {
+      if ($account_node->hasField('field_is_in_class')) {
+        $account_node->set('field_is_in_class', $in_class ? 0 : 1);
+        $account_node->save();
       }
     }
-    else {
-      // Nếu chưa có Account nào, chỉ log ra để dev biết (không lỗi).
-      \Drupal::logger('classroom')->notice('Không tìm thấy Account tương ứng với User @uid trong lớp @class.', [
+
+    if (empty($accounts)) {
+      Drupal::logger('classroom')->notice('Không tìm thấy Account tương ứng với User @uid trong lớp @class.', [
         '@uid' => $uid,
         '@class' => $class_nid,
       ]);
@@ -147,17 +110,10 @@ class ToggleStudentInClass extends ActionBase {
    * {@inheritdoc}
    */
   public function access($object, AccountInterface $account = NULL, $return_as_object = FALSE) {
-    // Nếu $account null thì lấy current user
     $account = $account ?: \Drupal::currentUser();
-
-    // Roles (machine names)
-    $allowed_roles = ['administrator', 'manager'];
-
-    // Kiểm tra role
-    $has_role = array_intersect($allowed_roles, $account->getRoles()) ? TRUE : FALSE;
-
-    $access = $has_role ? AccessResult::allowed() : AccessResult::forbidden();
+    $access = array_intersect(['administrator','manager'], $account->getRoles()) 
+      ? AccessResult::allowed() 
+      : AccessResult::forbidden();
     return $return_as_object ? $access : $access->isAllowed();
   }
-
 }
