@@ -8,6 +8,7 @@ use Drupal\Core\Session\AccountInterface;
 use Drupal\Core\Access\AccessResult;
 use Drupal\node\Entity\Node;
 use Drupal\user\Entity\User;
+use Drupal;
 
 /**
  * @Action(
@@ -98,18 +99,48 @@ class ToggleStudentInClass extends ActionBase {
     $target_ids = array_column($node->get('field_student_list')->getValue(), 'target_id');
     $uid = $entity->id();
 
+    // Xác định hành động (thêm hay gỡ)
+    $is_in_class = TRUE;
     if (in_array($uid, $target_ids)) {
       // Gỡ học sinh ra.
       $target_ids = array_diff($target_ids, [$uid]);
+      $is_in_class = FALSE;
       \Drupal::messenger()->addMessage(t('Đã gỡ học sinh @name khỏi lớp.', ['@name' => $entity->getDisplayName()]));
     } else {
       // Thêm học sinh vào lớp.
       $target_ids[] = $uid;
+      $is_in_class = TRUE;
       \Drupal::messenger()->addMessage(t('Đã thêm học sinh @name vào lớp.', ['@name' => $entity->getDisplayName()]));
     }
 
+    // Cập nhật danh sách học sinh trong lớp.
     $node->set('field_student_list', array_map(fn($id) => ['target_id' => $id], $target_ids));
     $node->save();
+
+    // === Cập nhật field_is_in_class trong Account tương ứng ===
+    $accounts = Drupal::entityTypeManager()
+      ->getStorage('node')
+      ->loadByProperties([
+        'type' => 'account',
+        'field_student' => $uid,
+        'field_classroom' => $class_nid,
+      ]);
+
+    if (!empty($accounts)) {
+      foreach ($accounts as $account_node) {
+        if ($account_node->hasField('field_is_in_class')) {
+          $account_node->set('field_is_in_class', $is_in_class ? 1 : 0);
+          $account_node->save();
+        }
+      }
+    }
+    else {
+      // Nếu chưa có Account nào, chỉ log ra để dev biết (không lỗi).
+      \Drupal::logger('classroom')->notice('Không tìm thấy Account tương ứng với User @uid trong lớp @class.', [
+        '@uid' => $uid,
+        '@class' => $class_nid,
+      ]);
+    }
   }
 
   /**
