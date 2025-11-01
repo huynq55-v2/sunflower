@@ -7,39 +7,100 @@ use Drupal\Core\Entity\EntityInterface;
  * Implements hook_views_post_execute().
  */
 function sunflower_lesson_views_post_execute(\Drupal\views\ViewExecutable $view) {
-  if ($view->id() !== 'student_by_lesson_management') {
+  if ($view->id() === 'student_by_lesson_remove') {
+    $lesson_nid = $view->args[0] ?? 0;
+    if (!$lesson_nid) return;
+
+    $lesson_node = \Drupal\node\Entity\Node::load($lesson_nid);
+    if (!$lesson_node || !$lesson_node->hasField('field_student_list')) return;
+
+    $student_refs = $lesson_node->get('field_student_list')->referencedEntities();
+    $student_uids = array_map(fn($u) => $u->id(), $student_refs);
+
+    $view->result = array_filter($view->result, fn($row) => in_array($row->_entity->id(), $student_uids));
+  }
+
+  if ($view->id() === 'student_by_lesson_add') {
+    $lesson_nid = $view->args[0] ?? 0;
+    if (!$lesson_nid) return;
+
+    $lesson_node = \Drupal\node\Entity\Node::load($lesson_nid);
+    if (!$lesson_node || !$lesson_node->hasField('field_student_list')) return;
+
+    $student_refs = $lesson_node->get('field_student_list')->referencedEntities();
+    $student_uids = array_map(fn($u) => $u->id(), $student_refs);
+
+    // Lọc chỉ giữ những user KHÔNG có trong buoi hoc
+    $view->result = array_filter($view->result, fn($row) => !in_array($row->_entity->id(), $student_uids));
+  }
+
+  // Bỏ qua khi chạy trong môi trường không có request thật (vd: admin preview, cron, Drush).
+  $request_stack = \Drupal::service('request_stack');
+  $request = $request_stack->getCurrentRequest();
+
+  if (!$request) {
+    \Drupal::logger('sunflower_classroom')->warning('No current request available for view @view.', ['@view' => $view->id()]);
+    // Đừng return ở đây — chỉ bỏ qua xử lý thêm.
     return;
   }
 
-  // Lấy Node ID lớp học từ URL argument
-  $class_nid = $view->args[0] ?? 0;
-  if (!$class_nid) {
+  // Bỏ qua khi chạy trong môi trường không có request thật (vd: admin preview, cron, Drush).
+  $request_stack = \Drupal::service('request_stack');
+  $request = $request_stack->getCurrentRequest();
+
+  if (!$request) {
+    \Drupal::logger('sunflower_lesson')->warning('No current request available for view @view.', [
+      '@view' => $view->id(),
+    ]);
+    // Không return để tránh ngắt các xử lý khác.
     return;
   }
 
-  $class_node = \Drupal\node\Entity\Node::load($class_nid);
-  if (!$class_node || !$class_node->hasField('field_student_list')) {
-    return;
-  }
+  // Xử lý session cho các view add/remove học sinh theo lesson.
+  if (in_array($view->id(), ['student_by_lesson_add', 'student_by_lesson_remove'])) {
+    $session = $request->getSession();
+    $current_path = $request->getPathInfo();
 
-  // Lấy UID các học sinh trong lesson
-  $student_refs = $class_node->get('field_student_list')->referencedEntities();
-  $student_uids = array_map(fn($u) => $u->id(), $student_refs);
+    // Ghi log đường dẫn hiện tại để debug.
+    \Drupal::logger('sunflower_lesson')->notice('Current path: @path', ['@path' => $current_path]);
 
-  // Thêm cột Yes/No cho mỗi row
-  foreach ($view->result as $row_index => $row) {
-    if (isset($row->_entity) && $row->_entity instanceof \Drupal\user\UserInterface) {
-      $uid = $row->_entity->id();
-      $row->in_class = in_array($uid, $student_uids) ? 'Yes' : 'No';
+    // Nếu URL có arg thì lưu vào session.
+    if (preg_match('#student-by-lesson-(add|remove)/(\d+)#', $current_path, $m)) {
+      $lesson_nid = (int) $m[2];
+      $session->set('sunflower_current_lesson', $lesson_nid);
+
+      \Drupal::logger('sunflower_lesson')->notice('Saved current lesson nid=@nid from path @path', [
+        '@nid' => $lesson_nid,
+        '@path' => $current_path,
+      ]);
+    }
+
+    // Lấy lại nếu là request AJAX (view không có args).
+    if (empty($view->args[0])) {
+      $saved = $session->get('sunflower_current_lesson');
+
+      if ($saved) {
+        $view->args[0] = $saved;
+        \Drupal::logger('sunflower_lesson')->notice('Restored lesson nid=@nid from session for view @view', [
+          '@nid' => $saved,
+          '@view' => $view->id(),
+        ]);
+      }
+      else {
+        \Drupal::logger('sunflower_lesson')->warning('No saved lesson nid found in session for view @view', [
+          '@view' => $view->id(),
+        ]);
+      }
     }
   }
+
 }
 
-function sunflower_lesson_views_pre_render(\Drupal\views\ViewExecutable $view) {
-  if ($view->id() === 'student_by_lesson_management') {
-    $args = $view->args;
-    if (!empty($args[0]) && is_numeric($args[0])) {
-      $_SESSION['current_lesson_nid'] = (int) $args[0];
-    }
-  }
-}
+// function sunflower_lesson_views_pre_render(\Drupal\views\ViewExecutable $view) {
+//   if ($view->id() === 'student_by_lesson_remove') {
+//     $args = $view->args;
+//     if (!empty($args[0]) && is_numeric($args[0])) {
+//       $_SESSION['current_lesson_nid'] = (int) $args[0];
+//     }
+//   }
+// }

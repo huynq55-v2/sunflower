@@ -8,6 +8,7 @@ use Drupal\Core\Session\AccountInterface;
 use Drupal\Core\Access\AccessResult;
 use Drupal\node\Entity\Node;
 use Drupal\user\Entity\User;
+use Drupal;
 
 /**
  * @Action(
@@ -22,38 +23,21 @@ class ToggleStudentInLesson extends ActionBase {
    * {@inheritdoc}
    */
   public function buildConfigurationForm(array $form, FormStateInterface $form_state) {
-    $nid = NULL;
+    $request = \Drupal::request();
+    $session = $request->getSession();
 
-    // 1️⃣ Thử lấy từ route parameter
-    $route_nid = \Drupal::routeMatch()->getParameter('nid');
-    if (is_numeric($route_nid)) {
-      $nid = (int) $route_nid;
-    }
+    // Lấy lesson_nid từ route, query hoặc session Symfony.
+    $nid = \Drupal::routeMatch()->getParameter('nid')
+      ?? ($request->query->get('nid'))
+      ?? $session->get('sunflower_current_lesson');
 
-    // 2️⃣ Thử lấy từ query string ?nid=123
-    if (!$nid && isset($_GET['nid']) && is_numeric($_GET['nid'])) {
-      $nid = (int) $_GET['nid'];
-    }
-
-    // 3️⃣ Thử lấy từ session (nếu có)
-    if (!$nid && isset($_SESSION['current_lesson_nid'])) {
-      $nid = (int) $_SESSION['current_lesson_nid'];
-    }
-
-    // 4️⃣ Nếu vẫn không có thì lấy từ URL thô (cũ)
-    if (!$nid) {
-      $request_path = \Drupal::request()->getPathInfo();
-      $parts = explode('/', trim($request_path, '/'));
-      $last_part = end($parts);
-      if (is_numeric($last_part)) {
-        $nid = (int) $last_part;
-      }
-    }
-
-    // 5️⃣ Lưu vào session để lần sau có thể dùng lại
-    if ($nid) {
-      $_SESSION['current_lesson_nid'] = $nid;
-    }
+    // === Debug info ===
+    \Drupal::logger('sunflower_lesson')->debug('buildConfigurationForm: route nid=@route, query nid=@query, session nid=@session, final nid=@nid', [
+      '@route' => \Drupal::routeMatch()->getParameter('nid'),
+      '@query' => $request->query->get('nid'),
+      '@session' => $session->get('sunflower_current_lesson'),
+      '@nid' => $nid,
+    ]);
 
     $form['lesson_nid'] = [
       '#type' => 'hidden',
@@ -62,7 +46,7 @@ class ToggleStudentInLesson extends ActionBase {
 
     if (empty($nid)) {
       $form['warning'] = [
-        '#markup' => '<div class="messages messages--warning">⚠️ Không xác định được buổi học từ URL. Hãy đảm bảo URL có dạng /student-by-lesson-management/[nid] hoặc thêm ?nid=123.</div>',
+        '#markup' => '<div class="messages messages--warning">⚠️ Không xác định được buổi học. URL phải có dạng /student-by-lesson-management/[nid] hoặc ?nid=123.</div>',
       ];
     }
 
@@ -73,16 +57,10 @@ class ToggleStudentInLesson extends ActionBase {
    * {@inheritdoc}
    */
   public function execute($entity = NULL) {
-    if (!$entity instanceof User) {
-      return;
-    }
+    if (!$entity instanceof User) return;
 
-    $lesson_nid = $this->configuration['lesson_nid'] ?? NULL;
-
-    // Nếu lesson_nid vẫn trống, thử lấy lại từ session.
-    if (!$lesson_nid && isset($_SESSION['current_lesson_nid'])) {
-      $lesson_nid = $_SESSION['current_lesson_nid'];
-    }
+    // Lấy lesson_nid trực tiếp từ form value.
+    $lesson_nid = $this->configuration['lesson_nid'] ?? 0;
 
     if (!$lesson_nid || !is_numeric($lesson_nid)) {
       \Drupal::messenger()->addError('Không xác định được buổi học.');
@@ -95,38 +73,53 @@ class ToggleStudentInLesson extends ActionBase {
       return;
     }
 
-    $target_ids = array_column($node->get('field_student_list')->getValue(), 'target_id');
+    $uids = array_column($node->get('field_student_list')->getValue(), 'target_id');
     $uid = $entity->id();
+    $in_lesson = in_array($uid, $uids);
 
-    if (in_array($uid, $target_ids)) {
-      // Gỡ học sinh ra.
-      $target_ids = array_diff($target_ids, [$uid]);
-      \Drupal::messenger()->addMessage(t('Đã gỡ học sinh @name khỏi buổi học.', ['@name' => $entity->getDisplayName()]));
-    } else {
-      // Thêm học sinh vào buổi học.
-      $target_ids[] = $uid;
-      \Drupal::messenger()->addMessage(t('Đã thêm học sinh @name vào buổi học.', ['@name' => $entity->getDisplayName()]));
+    // Toggle học sinh trong buổi học.
+    $in_lesson ? $uids = array_diff($uids, [$uid]) : $uids[] = $uid;
+    $node->set('field_student_list', array_map(fn($id) => ['target_id' => $id], $uids));
+    $node->save();
+
+    \Drupal::messenger()->addMessage(
+      $in_lesson
+        ? t('Đã gỡ học sinh @name khỏi buổi học.', ['@name' => $entity->getDisplayName()])
+        : t('Đã thêm học sinh @name vào buổi học.', ['@name' => $entity->getDisplayName()])
+    );
+
+    // === Cập nhật field_is_in_lesson cho các node "account" ===
+    $accounts = Drupal::entityTypeManager()
+      ->getStorage('node')
+      ->loadByProperties([
+        'type' => 'account',
+        'field_student' => $uid,
+        'field_lesson' => $lesson_nid,
+      ]);
+
+    foreach ($accounts as $account_node) {
+      if ($account_node->hasField('field_is_in_lesson')) {
+        $account_node->set('field_is_in_lesson', $in_lesson ? 0 : 1);
+        $account_node->save();
+      }
     }
 
-    $node->set('field_student_list', array_map(fn($id) => ['target_id' => $id], $target_ids));
-    $node->save();
+    if (empty($accounts)) {
+      Drupal::logger('sunflower_lesson')->notice('Không tìm thấy Account tương ứng với User @uid trong buổi học @lesson.', [
+        '@uid' => $uid,
+        '@lesson' => $lesson_nid,
+      ]);
+    }
   }
 
   /**
    * {@inheritdoc}
    */
   public function access($object, AccountInterface $account = NULL, $return_as_object = FALSE) {
-    // Nếu $account null thì lấy current user
     $account = $account ?: \Drupal::currentUser();
-
-    // Roles (machine names)
-    $allowed_roles = ['administrator', 'manager'];
-
-    // Kiểm tra role
-    $has_role = array_intersect($allowed_roles, $account->getRoles()) ? TRUE : FALSE;
-
-    $access = $has_role ? AccessResult::allowed() : AccessResult::forbidden();
+    $access = array_intersect(['administrator', 'manager'], $account->getRoles())
+      ? AccessResult::allowed()
+      : AccessResult::forbidden();
     return $return_as_object ? $access : $access->isAllowed();
   }
-
 }
