@@ -156,19 +156,19 @@ function sunflower_classroom_views_post_execute(\Drupal\views\ViewExecutable $vi
     $view->result = array_filter($view->result, fn($row) => in_array($row->_entity->id(), $student_uids));
   }
 
-  if ($view->id() === 'student_by_class_add') {
-    $class_nid = $view->args[0] ?? 0;
-    if (!$class_nid) return;
+  // if ($view->id() === 'student_by_class_add') {
+  //   $class_nid = $view->args[0] ?? 0;
+  //   if (!$class_nid) return;
 
-    $class_node = \Drupal\node\Entity\Node::load($class_nid);
-    if (!$class_node || !$class_node->hasField('field_student_list')) return;
+  //   $class_node = \Drupal\node\Entity\Node::load($class_nid);
+  //   if (!$class_node || !$class_node->hasField('field_student_list')) return;
 
-    $student_refs = $class_node->get('field_student_list')->referencedEntities();
-    $student_uids = array_map(fn($u) => $u->id(), $student_refs);
+  //   $student_refs = $class_node->get('field_student_list')->referencedEntities();
+  //   $student_uids = array_map(fn($u) => $u->id(), $student_refs);
 
-    // Lọc chỉ giữ những user KHÔNG có trong lớp
-    $view->result = array_filter($view->result, fn($row) => !in_array($row->_entity->id(), $student_uids));
-  }
+  //   // Lọc chỉ giữ những user KHÔNG có trong lớp
+  //   $view->result = array_filter($view->result, fn($row) => !in_array($row->_entity->id(), $student_uids));
+  // }
 
   // Bỏ qua khi chạy trong môi trường không có request thật (vd: admin preview, cron, Drush).
   $request_stack = \Drupal::service('request_stack');
@@ -238,5 +238,40 @@ function sunflower_classroom_views_pre_execute(ViewExecutable $view) {
         $view->setTitle($user->getDisplayName() . ' ' . $user->get('field_full_name')->value);
       }
     }
+  }
+}
+
+use Drupal\views\Plugin\views\query\QueryPluginBase;
+
+/**
+ * Implements hook_views_query_alter().
+ */
+function sunflower_classroom_views_query_alter(ViewExecutable $view, QueryPluginBase $query) {
+  if ($view->id() === 'student_by_class_add' && $view->current_display === 'page_1') {
+
+    $class_nid = (int) ($view->args[0] ?? 0);
+
+    // ✅ 1. Loại bỏ tất cả join tới node_field_data để tránh điều kiện sai.
+    unset($query->tables['node__field_student_list']);
+    unset($query->tables['field_student_list_users_field_data']);
+
+    // ✅ 2. Xóa mọi điều kiện liên quan đến nid.
+    foreach ($query->where as &$group) {
+      foreach ($group['conditions'] as $key => $condition) {
+        if (is_array($condition)
+          && isset($condition['field'])
+          && strpos($condition['field'], 'field_student_list_users_field_data.nid') !== FALSE) {
+          unset($group['conditions'][$key]);
+        }
+      }
+    }
+
+    // ✅ 3. Thêm subquery NOT IN (chuẩn Drupal)
+    $subquery = \Drupal::database()->select('node__field_student_list', 'nsl');
+    $subquery->addField('nsl', 'field_student_list_target_id');
+    $subquery->condition('nsl.entity_id', $class_nid);
+    $subquery->condition('nsl.deleted', 0);
+
+    $query->addWhere(0, 'users_field_data.uid', $subquery, 'NOT IN');
   }
 }

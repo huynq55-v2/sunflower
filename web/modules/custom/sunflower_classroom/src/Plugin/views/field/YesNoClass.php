@@ -22,7 +22,7 @@ class YesNoClass extends FieldPluginBase {
     }
 
     // Lấy Node ID lớp học từ URL argument.
-    $class_nid = $this->view->args[0] ?? 0;
+    $class_nid = (int) ($view->args[0] ?? 0);
     if (!$class_nid) {
       return '';
     }
