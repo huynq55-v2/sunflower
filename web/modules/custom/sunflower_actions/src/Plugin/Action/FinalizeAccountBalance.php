@@ -91,19 +91,22 @@ class FinalizeAccountBalance extends ActionBase {
       return;
     }
 
+    $time = \Drupal::time()->getCurrentTime();
+
+    $title = 'Chốt sổ - ' . $user->getDisplayName() . ' - ' 
+    . ($user->hasField('field_full_name') && !$user->get('field_full_name')->isEmpty() ? $user->get('field_full_name')->value : '')
+    . ' (' . \Drupal::service('date.formatter')->format($time, 'custom', 'Y-m-d H:i') . ')';
+
     // ✅ Tạo node teacher_income (dùng chung cho cả teacher và student).
     $income_node = Node::create([
       'type' => 'teacher_income',
-      'title' => 'Chốt sổ - ' 
-  . $user->getDisplayName()
-  . ' - ' 
-  . ($user->hasField('field_full_name') && !$user->get('field_full_name')->isEmpty() ? $user->get('field_full_name')->value : '')
-  . ' (' . date('Y-m-d H:i') . ')',
+      'title' => $title,
       'field_teacher' => $user->id(),
       'field_amount' => -$total_balance,
       'field_account' => $user_accounts,
       'field_received_money' => 0,
       'field_related_transactions' => $related_transactions,
+      'created' => $time,
     ]);
     $income_node->save();
 

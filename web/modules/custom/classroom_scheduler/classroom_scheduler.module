@@ -102,7 +102,6 @@ function classroom_scheduler_node_update(NodeInterface $node) {
         'field_type' => 'debit',
         'field_date' => $study_time ? substr($study_time, 0, 10) : date('Y-m-d'),
       ]);
-      $txn->setCreatedTime($timestamp);
       $txn->save();
 
       \Drupal::logger('classroom_scheduler')->notice('CREATED transaction node @id for student @student.', [
@@ -133,7 +132,6 @@ function classroom_scheduler_node_update(NodeInterface $node) {
         'field_type' => 'credit',
         'field_date' => $study_time ? substr($study_time, 0, 10) : date('Y-m-d'),
       ]);
-      $txn_teacher->setCreatedTime($timestamp);
       $txn_teacher->save();
       
       \Drupal::logger('classroom_scheduler')->notice('CREATED transaction node @id for teacher @teacher.', [
