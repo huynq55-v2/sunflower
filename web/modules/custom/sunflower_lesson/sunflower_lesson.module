@@ -18,6 +18,8 @@ function sunflower_lesson_views_post_execute(\Drupal\views\ViewExecutable $view)
     $student_uids = array_map(fn($u) => $u->id(), $student_refs);
 
     $view->result = array_filter($view->result, fn($row) => in_array($row->_entity->id(), $student_uids));
+    $title = $lesson_node->label();
+    $view->setTitle("Danh sách học sinh - {$title}");
   }
 
   // if ($view->id() === 'student_by_lesson_add') {
@@ -96,14 +98,16 @@ function sunflower_lesson_views_post_execute(\Drupal\views\ViewExecutable $view)
 
 }
 
-// function sunflower_lesson_views_pre_render(\Drupal\views\ViewExecutable $view) {
-//   if ($view->id() === 'student_by_lesson_remove') {
-//     $args = $view->args;
-//     if (!empty($args[0]) && is_numeric($args[0])) {
-//       $_SESSION['current_lesson_nid'] = (int) $args[0];
-//     }
-//   }
-// }
+function sunflower_lesson_views_pre_render($view) {
+  if ($view->id() === 'student_by_lesson_add' && $view->current_display === 'page_1') {
+    $lesson_nid = (int) ($view->args[0] ?? 0);
+    if ($lesson_nid) {
+      if ($lesson_node = \Drupal\node\Entity\Node::load($lesson_nid)) {
+        $view->setTitle('Thêm học sinh vào buổi học ' . $lesson_node->label());
+      }
+    }
+  }
+}
 
 use Drupal\views\ViewExecutable;
 use Drupal\views\Plugin\views\query\QueryPluginBase;
