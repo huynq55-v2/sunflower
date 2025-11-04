@@ -128,6 +128,7 @@ function _sunflower_school_create_user_accounts(Node $entity) {
         'title' => $title,
         'field_student' => $uid,
         'field_classroom' => $class_id,
+        'field_is_in_class' => 1
       ]);
       $account->save();
 
