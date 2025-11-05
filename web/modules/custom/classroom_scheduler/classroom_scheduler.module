@@ -5,38 +5,16 @@ use Drupal\Core\Form\FormStateInterface;
 use Drupal\node\Entity\Node;
 
 /**
- * Implements hook_node_update().
+ * Helper function to create transactions for a lesson.
+ * This function contains the logic previously in "CASE 1".
  */
-function classroom_scheduler_node_update(NodeInterface $node) {
-  if ($node->bundle() !== 'lesson') {
+function _classroom_scheduler_create_lesson_transactions(NodeInterface $node) {
+  // Ensure we are only processing 'lesson' nodes that are marked as "happened".
+  if ($node->bundle() !== 'lesson' || !$node->get('field_is_happened')->value) {
     return;
   }
 
-  // Ghi log để xác nhận hook được gọi cho đúng buổi học
-  \Drupal::logger('classroom_scheduler')->notice('hook_node_update triggered for lesson: @label (ID: @id)', [
-    '@label' => $node->label(),
-    '@id' => $node->id()
-  ]);
-
-  // Kiểm tra xem node->original có tồn tại không
-  if (!isset($node->original)) {
-    \Drupal::logger('classroom_scheduler')->warning('Node original property not found on update.');
-    return;
-  }
-
-  $old_value = $node->original->get('field_is_happened')->value ?? 0;
-  $new_value = $node->get('field_is_happened')->value ?? 0;
-
-  // Ghi log giá trị cũ và mới
-  \Drupal::logger('classroom_scheduler')->notice('field_is_happened changed from @old to @new.', [
-    '@old' => $old_value,
-    '@new' => $new_value
-  ]);
-
-  // Chỉ thực hiện khi có sự thay đổi giá trị
-  if ($old_value == $new_value) {
-    return;
-  }
+  \Drupal::logger('classroom_scheduler')->notice('Starting to create transactions for lesson: @label', ['@label' => $node->label()]);
 
   /** @var \Drupal\node\NodeInterface $classroom */
   $classroom = $node->get('field_classroom')->entity;
@@ -47,9 +25,7 @@ function classroom_scheduler_node_update(NodeInterface $node) {
     return;
   }
   
-  // Ghi log thông tin lớp học
   \Drupal::logger('classroom_scheduler')->notice('Found classroom: @label', ['@label' => $classroom->label()]);
-
 
   $fee = (int) $classroom->get('field_fee')->value;
   $teacher = $classroom->get('field_teacher')->entity ?? NULL;
@@ -68,90 +44,114 @@ function classroom_scheduler_node_update(NodeInterface $node) {
   
   $lesson_label = $node->label();
   $study_time = $node->get('field_study_time')->value;
-  $timestamp = $study_time ? strtotime($study_time) : time();
+
+  // ========== Create transactions for STUDENTS ==========
+  foreach ($students as $student) {
+    $account = sunflower_get_account_for($student->id(), $classroom->id());
+    if (!$account) {
+      \Drupal::logger('classroom_scheduler')->warning('Không tìm thấy tài khoản cho học sinh @student trong lớp @class. Bỏ qua.', [
+        '@student' => $student->label(),
+        '@class' => $classroom->label(),
+      ]);
+      continue;
+    }
+    \Drupal::logger('classroom_scheduler')->notice('Processing student: @student, account: @account', [
+      '@student' => $student->label(),
+      '@account' => $account->label(),
+    ]);
+
+    $txn = Node::create([
+      'type' => 'transaction',
+      'title' => "Học phí {$lesson_label} - {$student->label()}" .
+        ($student->hasField('field_full_name') && !$student->get('field_full_name')->isEmpty()
+          ? ' (' . $student->get('field_full_name')->value . ')'
+          : ''),
+      'field_lesson' => ['target_id' => $node->id()],
+      'field_account' => ['target_id' => $account->id()],
+      'field_amount' => $fee,
+      'field_type' => 'debit',
+      'field_date' => $study_time ? substr($study_time, 0, 10) : date('Y-m-d'),
+    ]);
+    $txn->save();
+
+    \Drupal::logger('classroom_scheduler')->notice('CREATED transaction node @id for student @student.', [
+      '@id' => $txn->id(),
+      '@student' => $student->label(),
+    ]);
+
+    sunflower_update_account_transactions($account, $txn);
+  }
+
+  // ========== Create transaction for TEACHER ==========
+  $teacher_account = sunflower_get_account_for($teacher->id(), $classroom->id());
+  if ($teacher_account) {
+    $total_credit = count($students) * $fee;
+
+    $txn_teacher = Node::create([
+      'type' => 'transaction',
+      'title' => "Thu nhập {$lesson_label} - {$teacher->label()}" .
+        ($teacher->hasField('field_full_name') && !$teacher->get('field_full_name')->isEmpty()
+          ? ' (' . $teacher->get('field_full_name')->value . ')'
+          : ''),
+      'field_lesson' => ['target_id' => $node->id()],
+      'field_account' => ['target_id' => $teacher_account->id()],
+      'field_amount' => $total_credit,
+      'field_type' => 'credit',
+      'field_date' => $study_time ? substr($study_time, 0, 10) : date('Y-m-d'),
+    ]);
+    $txn_teacher->save();
+    
+    \Drupal::logger('classroom_scheduler')->notice('CREATED transaction node @id for teacher @teacher.', [
+      '@id' => $txn_teacher->id(),
+      '@teacher' => $teacher->label(),
+    ]);
+
+    sunflower_update_account_transactions($teacher_account, $txn_teacher);
+  }
+
+  \Drupal::messenger()->addStatus("✅ Đã tạo giao dịch cho buổi học {$lesson_label}.");
+}
+
+/**
+ * Implements hook_node_insert().
+ */
+function classroom_scheduler_node_insert(NodeInterface $node) {
+  // If a new lesson is created and it's already "happened" (by default), create transactions.
+  if ($node->bundle() === 'lesson' && $node->get('field_is_happened')->value == 1) {
+    \Drupal::logger('classroom_scheduler')->notice('hook_node_insert triggered for new lesson: @label. Creating transactions.', [
+      '@label' => $node->label(),
+    ]);
+    _classroom_scheduler_create_lesson_transactions($node);
+  }
+}
+
+/**
+ * Implements hook_node_update().
+ */
+function classroom_scheduler_node_update(NodeInterface $node) {
+  if ($node->bundle() !== 'lesson' || !isset($node->original)) {
+    return;
+  }
+
+  $old_value = (int) $node->original->get('field_is_happened')->value;
+  $new_value = (int) $node->get('field_is_happened')->value;
+
+  if ($old_value === $new_value) {
+    return;
+  }
 
   // ========== CASE 1: "chưa học" -> "đã học" ==========
+  // This handles the case where a lesson was manually set to "not happened" and is now being marked as "happened" again.
   if ($old_value == 0 && $new_value == 1) {
-    \Drupal::logger('classroom_scheduler')->notice('CASE 1: "chưa học" -> "đã học". Starting to create transactions.');
-
-    foreach ($students as $student) {
-      $account = sunflower_get_account_for($student->id(), $classroom->id());
-      if (!$account) {
-        \Drupal::logger('classroom_scheduler')->warning('Không tìm thấy tài khoản cho học sinh @student trong lớp @class. Bỏ qua.', [
-          '@student' => $student->label(),
-          '@class' => $classroom->label(),
-        ]);
-        continue;
-      }
-      \Drupal::logger('classroom_scheduler')->notice('Processing student: @student, account: @account', [
-        '@student' => $student->label(),
-        '@account' => $account->label(),
-      ]);
-
-      $fee_amount = $fee;
-
-      $txn = Node::create([
-        'type' => 'transaction',
-        'title' => "Học phí {$lesson_label} - {$student->label()}" .
-          ($student->hasField('field_full_name') && !$student->get('field_full_name')->isEmpty()
-            ? ' (' . $student->get('field_full_name')->value . ')'
-            : ''),
-        'field_lesson' => ['target_id' => $node->id()],
-        'field_account' => ['target_id' => $account->id()],
-        'field_amount' => $fee_amount,
-        'field_type' => 'debit',
-        'field_date' => $study_time ? substr($study_time, 0, 10) : date('Y-m-d'),
-      ]);
-      $txn->save();
-
-      \Drupal::logger('classroom_scheduler')->notice('CREATED transaction node @id for student @student.', [
-        '@id' => $txn->id(),
-        '@student' => $student->label(),
-      ]);
-
-      sunflower_update_account_transactions($account, $txn);
-
-      // KHÔNG cần gọi update balance ở đây nữa. Hook entity_insert/update của `sunflower_finance` sẽ tự động làm việc này.
-      // \Drupal::service('sunflower_finance.account_balance_manager')->updateAccountBalance($account->id());
-    }
-
-    // 🧩 Giáo viên
-    $teacher_account = sunflower_get_account_for($teacher->id(), $classroom->id());
-    if ($teacher_account) {
-      $total_credit = count($students) * $fee;
-
-      $txn_teacher = Node::create([
-        'type' => 'transaction',
-        'title' => "Thu nhập {$lesson_label} - {$teacher->label()}" .
-          ($teacher->hasField('field_full_name') && !$teacher->get('field_full_name')->isEmpty()
-            ? ' (' . $teacher->get('field_full_name')->value . ')'
-            : ''),
-        'field_lesson' => ['target_id' => $node->id()],
-        'field_account' => ['target_id' => $teacher_account->id()],
-        'field_amount' => $total_credit,
-        'field_type' => 'credit',
-        'field_date' => $study_time ? substr($study_time, 0, 10) : date('Y-m-d'),
-      ]);
-      $txn_teacher->save();
-      
-      \Drupal::logger('classroom_scheduler')->notice('CREATED transaction node @id for teacher @teacher.', [
-        '@id' => $txn_teacher->id(),
-        '@teacher' => $teacher->label(),
-      ]);
-
-      sunflower_update_account_transactions($teacher_account, $txn_teacher);
-      // KHÔNG cần gọi update balance ở đây nữa.
-      // \Drupal::service('sunflower_finance.account_balance_manager')->updateAccountBalance($teacher_account->id());
-    }
-
-    \Drupal::messenger()->addStatus("✅ Đã tạo giao dịch cho buổi học {$lesson_label}.");
+    \Drupal::logger('classroom_scheduler')->notice('hook_node_update: CASE 1 ("chưa học" -> "đã học"). Re-creating transactions.');
+    _classroom_scheduler_create_lesson_transactions($node);
   }
 
   // ========== CASE 2: "đã học" -> "chưa học" ==========
+  // This handles canceling a lesson. It deletes existing transactions.
   if ($old_value == 1 && $new_value == 0) {
-    \Drupal::logger('classroom_scheduler')->notice('CASE 2: "đã học" -> "chưa học". Starting to delete transactions.');
+    \Drupal::logger('classroom_scheduler')->notice('hook_node_update: CASE 2 ("đã học" -> "chưa học"). Deleting transactions.');
     
-    // ... (phần code case 2 của bạn) ...
     $query = \Drupal::entityQuery('node')
       ->condition('type', 'transaction')
       ->condition('field_lesson', $node->id())
@@ -166,21 +166,15 @@ function classroom_scheduler_node_update(NodeInterface $node) {
         $account = $txn->get('field_account')->entity;
         if (!$account) continue;
 
-        // Lưu ID tài khoản để tính toán lại sau khi xóa hết giao dịch
         $affected_accounts[$account->id()] = $account;
-
-        // Xóa transaction khỏi field_transactions trước
         sunflower_remove_transaction_from_account($account, $txn);
-
-        $txn->delete(); // <- Hook entity_delete của `sunflower_finance` sẽ được gọi ở đây.
+        $txn->delete();
         
         \Drupal::logger('classroom_scheduler')->notice('DELETED transaction node for account @account.', [
             '@account' => $account->label(),
         ]);
       }
       
-      // Hook entity_delete đã lo việc cập nhật balance rồi, nên vòng lặp này có thể không cần thiết nữa
-      // Nhưng để cho chắc chắn, bạn có thể gọi lại 1 lần sau khi mọi thứ đã xóa xong.
       foreach ($affected_accounts as $acc) {
          \Drupal::service('sunflower_finance.account_balance_manager')->updateAccountBalance($acc->id());
       }
@@ -274,6 +268,9 @@ function classroom_scheduler_form_alter(&$form, FormStateInterface $form_state, 
           $form['field_student_list']['widget']['#default_value'] = $classroom->get('field_student_list')->referencedEntities();
         }
       }
+
+      $form['field_student_list']['#disabled'] = TRUE;
+      $form['field_is_happened']['#disabled'] = TRUE;
 
       // ✅ Gợi ý tên buổi học
       $query = \Drupal::entityTypeManager()->getStorage('node')->getQuery();
