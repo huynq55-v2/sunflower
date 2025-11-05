@@ -269,7 +269,6 @@ function classroom_scheduler_form_alter(&$form, FormStateInterface $form_state, 
         }
       }
 
-      $form['field_student_list']['#disabled'] = TRUE;
       $form['field_is_happened']['#disabled'] = TRUE;
 
       // ✅ Gợi ý tên buổi học
