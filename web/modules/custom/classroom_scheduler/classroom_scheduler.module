@@ -136,8 +136,48 @@ function classroom_scheduler_node_update(NodeInterface $node) {
   $old_value = (int) $node->original->get('field_is_happened')->value;
   $new_value = (int) $node->get('field_is_happened')->value;
 
-  if ($old_value === $new_value) {
-    return;
+  if ($old_value === $new_value && $new_value == 1) {
+    // 🧩 Lesson đã "đã học" cả trước và sau, ta kiểm tra danh sách học sinh có thay đổi không
+    $old_students = array_map(fn($i) => $i['target_id'], $node->original->get('field_student_list')->getValue() ?? []);
+    $new_students = array_map(fn($i) => $i['target_id'], $node->get('field_student_list')->getValue() ?? []);
+
+    sort($old_students);
+    sort($new_students);
+
+    if ($old_students !== $new_students) {
+      \Drupal::logger('classroom_scheduler')->notice('hook_node_update: STUDENT LIST CHANGED for lesson @label. Rebuilding transactions.', [
+        '@label' => $node->label(),
+      ]);
+
+      // Xóa tất cả transaction cũ
+      $query = \Drupal::entityQuery('node')
+        ->condition('type', 'transaction')
+        ->condition('field_lesson', $node->id())
+        ->accessCheck(FALSE);
+      $txn_ids = $query->execute();
+
+      if ($txn_ids) {
+        $txns = \Drupal\node\Entity\Node::loadMultiple($txn_ids);
+        $affected_accounts = [];
+        foreach ($txns as $txn) {
+          $account = $txn->get('field_account')->entity;
+          if ($account) {
+            $affected_accounts[$account->id()] = $account;
+            sunflower_remove_transaction_from_account($account, $txn);
+          }
+          $txn->delete();
+        }
+
+        foreach ($affected_accounts as $acc) {
+          \Drupal::service('sunflower_finance.account_balance_manager')->updateAccountBalance($acc->id());
+        }
+
+        \Drupal::logger('classroom_scheduler')->notice('Deleted old transactions for lesson @label.', ['@label' => $node->label()]);
+      }
+
+      // Tạo lại toàn bộ giao dịch
+      _classroom_scheduler_create_lesson_transactions($node);
+    }
   }
 
   // ========== CASE 1: "chưa học" -> "đã học" ==========
