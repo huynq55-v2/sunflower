@@ -225,39 +225,66 @@ function classroom_scheduler_node_update(NodeInterface $node) {
 }
 
 /**
- * Hook chạy trước khi node được lưu.
- * Mục tiêu: chặn revert nếu có giao dịch đã tính tiền.
+ * Hook chạy trước khi node 'lesson' được lưu.
+ * - Không cho phép revert nếu có giao dịch đã tính tiền.
+ * - Không cho phép sửa danh sách học sinh nếu có giao dịch đã tính tiền.
  */
 function classroom_scheduler_node_presave(NodeInterface $node) {
+  // Chỉ xử lý với node loại 'lesson' và phải là node đã tồn tại.
   if ($node->bundle() !== 'lesson' || !$node->original) {
     return;
   }
 
+  $lesson_label = $node->label();
+
+  // --- 1️⃣ Kiểm tra thay đổi trạng thái field_is_happened ---
   $old_value = $node->original->get('field_is_happened')->value ?? 0;
   $new_value = $node->get('field_is_happened')->value ?? 0;
 
-  if ($old_value == 1 && $new_value == 0) {
-    $lesson_label = $node->label();
+  // Tìm tất cả giao dịch của buổi học này.
+  $query = \Drupal::entityQuery('node')
+    ->condition('type', 'transaction')
+    ->condition('field_lesson', $node->id())
+    ->accessCheck(FALSE);
+  $txn_ids = $query->execute();
 
-    // Tìm tất cả giao dịch của buổi học này.
-    $query = \Drupal::entityQuery('node')
-      ->condition('type', 'transaction')
-      ->condition('field_lesson', $node->id())
-      ->accessCheck(FALSE);
-    $txn_ids = $query->execute();
+  // Nếu không có giao dịch nào → cho phép.
+  if (empty($txn_ids)) {
+    return;
+  }
 
-    if (!empty($txn_ids)) {
-      $paid_txn_ids = \Drupal::entityQuery('node')
-        ->condition('nid', $txn_ids, 'IN')
-        ->condition('field_has_calculated_money', TRUE)
-        ->accessCheck(FALSE)
-        ->execute();
+  // Kiểm tra có giao dịch nào đã tính tiền chưa.
+  $paid_txn_ids = \Drupal::entityQuery('node')
+    ->condition('nid', $txn_ids, 'IN')
+    ->condition('field_has_calculated_money', TRUE)
+    ->accessCheck(FALSE)
+    ->execute();
 
-      if (!empty($paid_txn_ids)) {
-        \Drupal::messenger()->addError("❌ Buổi học {$lesson_label} không thể revert vì có giao dịch đã tính tiền cho người dùng.");
-        // Giữ nguyên trạng thái cũ → không revert được.
-        $node->set('field_is_happened', 1);
-      }
+  $has_paid_txn = !empty($paid_txn_ids);
+
+  // --- 2️⃣ Nếu có giao dịch đã tính tiền → không cho revert ---
+  if ($has_paid_txn && $old_value == 1 && $new_value == 0) {
+    \Drupal::messenger()->addError("❌ Buổi học {$lesson_label} không thể revert vì có giao dịch đã tính tiền cho người dùng.");
+    // Giữ nguyên trạng thái cũ.
+    $node->set('field_is_happened', 1);
+  }
+
+  // --- 3️⃣ Nếu có giao dịch đã tính tiền → không cho sửa danh sách học sinh ---
+  if ($has_paid_txn) {
+    $old_students = $node->original->get('field_student_list')->getValue();
+    $new_students = $node->get('field_student_list')->getValue();
+
+    // Chuyển thành mảng ID để so sánh.
+    $old_ids = array_column($old_students, 'target_id');
+    $new_ids = array_column($new_students, 'target_id');
+
+    sort($old_ids);
+    sort($new_ids);
+
+    if ($old_ids !== $new_ids) {
+      \Drupal::messenger()->addError("❌ Buổi học {$lesson_label} đã có giao dịch được tính tiền. Không thể thay đổi danh sách học sinh.");
+      // Giữ nguyên danh sách học sinh cũ để tránh mất dữ liệu.
+      $node->set('field_student_list', $old_students);
     }
   }
 }
