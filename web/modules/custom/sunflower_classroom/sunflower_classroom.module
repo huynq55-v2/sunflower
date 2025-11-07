@@ -15,10 +15,92 @@ function sunflower_classroom_entity_presave(EntityInterface $entity) {
   }
 
   // Nếu là node mới, Drupal chưa gán ID → xử lý sau khi insert.
-  // Nếu là node đã tồn tại (edit) → tạo account ngay.
-  if (!$entity->isNew()) {
-    _sunflower_school_create_user_accounts($entity);
+  if ($entity->isNew()) {
+    return;
   }
+
+  // Giữ nguyên logic cũ.
+  _sunflower_school_create_user_accounts($entity);
+
+  // Chỉ xử lý logic publish/unpublish cho classroom.
+  if ($entity->bundle() !== 'classroom') {
+    return;
+  }
+
+  /** @var \Drupal\node\Entity\Node $original */
+  $original = $entity->original ?? NULL;
+  if (!$original) {
+    return;
+  }
+
+  // Lấy trạng thái cũ và mới.
+  $old_status = (int) $original->isPublished();
+  $new_status = (int) $entity->isPublished();
+
+  // Nếu không thay đổi trạng thái publish, bỏ qua.
+  if ($old_status === $new_status) {
+    return;
+  }
+
+  $classroom_id = $entity->id();
+
+  // --- Lấy tất cả Account thuộc classroom ---
+  $account_nids = \Drupal::entityQuery('node')
+    ->accessCheck(FALSE)
+    ->condition('type', 'account')
+    ->condition('field_classroom.target_id', $classroom_id)
+    ->execute();
+  $accounts = Node::loadMultiple($account_nids);
+
+  // --- Lấy tất cả Lesson thuộc classroom ---
+  $lesson_nids = \Drupal::entityQuery('node')
+    ->accessCheck(FALSE)
+    ->condition('type', 'lesson')
+    ->condition('field_classroom.target_id', $classroom_id)
+    ->execute();
+  $lessons = Node::loadMultiple($lesson_nids);
+
+  // --- Lấy tất cả Transaction liên quan đến các Account ---
+  $transaction_nids = [];
+  $log_nids = [];
+  if (!empty($account_nids)) {
+    $transaction_nids = \Drupal::entityQuery('node')
+      ->accessCheck(FALSE)
+      ->condition('type', 'transaction')
+      ->condition('field_account.target_id', array_values($account_nids), 'IN')
+      ->execute();
+
+    $log_nids = \Drupal::entityQuery('node')
+      ->accessCheck(FALSE)
+      ->condition('type', 'transaction_log')
+      ->condition('field_account.target_id', array_values($account_nids), 'IN')
+      ->execute();
+  }
+
+  $transactions = Node::loadMultiple($transaction_nids);
+  $logs = Node::loadMultiple($log_nids);
+
+  // --- Gộp toàn bộ node liên quan ---
+  $related_nodes = array_merge($accounts, $lessons, $transactions, $logs);
+
+  // --- Cập nhật trạng thái ---
+  foreach ($related_nodes as $related_node) {
+    if ($new_status === 0) {
+      // Classroom bị unpublish → unpublish tất cả
+      $related_node->setUnpublished();
+    }
+    else {
+      // Classroom được re-publish → publish lại tất cả
+      $related_node->setPublished();
+    }
+    $related_node->save();
+  }
+
+  \Drupal::logger('sunflower')->notice('Classroom @id status changed (@old → @new): updated related nodes (accounts, lessons, transactions, logs).', [
+    '@id' => $classroom_id,
+    '@old' => $old_status,
+    '@new' => $new_status,
+  ]);
 }
 
 /**
